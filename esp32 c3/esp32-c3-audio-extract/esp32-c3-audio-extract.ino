@@ -5,7 +5,7 @@
 #define I2S_SD   5   // DOUT dari mic
 #define I2S_PORT I2S_NUM_0
 
-bool isRecording = false;
+bool isRecording = false; 
 
 void setup() {
   Serial.begin(115200);
