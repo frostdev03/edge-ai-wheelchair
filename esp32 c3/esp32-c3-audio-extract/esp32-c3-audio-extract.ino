@@ -1,8 +1,8 @@
 #include <driver/i2s.h>
 
-#define I2S_WS   7   // LRCLK
-#define I2S_SCK  6   // BCLK
-#define I2S_SD   5   // DOUT dari mic
+#define I2S_WS   21   // LRCLK
+#define I2S_SCK  20   // BCLK
+#define I2S_SD   0   // DOUT dari mic
 #define I2S_PORT I2S_NUM_0
 
 bool isRecording = false; 

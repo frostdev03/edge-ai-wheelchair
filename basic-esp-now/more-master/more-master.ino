@@ -31,48 +31,13 @@ void OnDataSent(const uint8_t *mac, esp_now_send_status_t status) {
 
 /* ================= SETUP ================= */
 
-// void setup() {
-//   Serial.begin(115200);
-//   delay(1000);
-
-//   /* --- WiFi clean state (WAJIB di C3) --- */
-//   // esp_netif_init();
-//   // esp_event_loop_create_default();
-//   WiFi.mode(WIFI_STA);
-//   // WiFi.disconnect(true, true);
-//   delay(100);
-
-//   esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
-
-//   /* --- Init ESP-NOW --- */
-//   if (esp_now_init() != ESP_OK) {
-//     Serial.println("❌ ESP-NOW init failed");
-//     return;
-//   }
-
-//   esp_now_register_send_cb(OnDataSent);
-
-//   /* --- Register Peer (HARUS zeroed) --- */
-//   esp_now_peer_info_t peerInfo = {};
-//   memcpy(peerInfo.peer_addr, MACaddress, 6);
-//   peerInfo.channel = ESPNOW_CHANNEL;
-//   peerInfo.encrypt = false;
-//   peerInfo.ifidx = WIFI_IF_STA;
-
-//   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-//     Serial.println("❌ Failed to add peer");
-//     return;
-//   }
-
-//   pinMode(LED, OUTPUT);
-//   Serial.println("✅ ESP-NOW ready (ESP32-C3)");
-// }
-
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
   WiFi.mode(WIFI_STA);
+    // WiFi.disconnect(true, true);
+
   delay(100);
 
   esp_wifi_set_ps(WIFI_PS_NONE);   // 🔥 WIFI FULL POWER
@@ -119,9 +84,17 @@ void loop() {
     sizeof(outData)
   );
 
+  // if (result != ESP_OK) {
+  //   Serial.printf("❌ Send error: %d\n", result);
+  // }
   if (result != ESP_OK) {
-    Serial.printf("❌ Send error: %d\n", result);
-  }
+  Serial.printf(
+    "❌ Send error: %d (%s)\n",
+    result,
+    esp_err_to_name(result)
+  );
+}
+
 
   delay(3000);
 }
