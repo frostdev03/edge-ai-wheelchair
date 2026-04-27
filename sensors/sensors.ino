@@ -1,16 +1,16 @@
 // ===== HC-SR04 Pins =====
-#define TRIG1 1
-#define ECHO1 2
+#define TRIG1 4
+#define ECHO1 5
 
-#define TRIG2 42
-#define ECHO2 41
+#define TRIG2 6
+#define ECHO2 7
 
-#define TRIG3 40
-#define ECHO3 39
+#define TRIG3 12
+#define ECHO3 15
 
 // ===== TC-RT5000 Pins =====
-#define IR1 38
-#define IR2 35
+// #define IR1 38
+// #define IR2 35
 
 // long readUltrasonic(int trigPin, int echoPin) {
 //   digitalWrite(trigPin, LOW);
@@ -49,8 +49,8 @@ void setup() {
   pinMode(TRIG3, OUTPUT);
   pinMode(ECHO3, INPUT);
 
-  pinMode(IR1, INPUT);
-  pinMode(IR2, INPUT);
+  // pinMode(IR1, INPUT);
+  // pinMode(IR2, INPUT);
 
   Serial.println("ESP32-S3 Sensor Read Test Started");
 }
@@ -64,8 +64,8 @@ void loop() {
   long d3 = readUltrasonicCM(TRIG3, ECHO3);
 
 
-  int ir1 = digitalRead(IR1);
-  int ir2 = digitalRead(IR2);
+  // int ir1 = digitalRead(IR1);
+  // int ir2 = digitalRead(IR2);
 
   Serial.println("---- RAW SENSOR VALUES ----");
   Serial.print("HC-SR04 #1 (cm): ");
@@ -80,10 +80,10 @@ void loop() {
   // Serial.println(us2);
   // Serial.print("HC-SR04 #3 (us): ");
   // Serial.println(us3);
-  Serial.print("TC-RT5000 #1 (ADC): ");
-  Serial.println(ir1);
-  Serial.print("TC-RT5000 #2 (ADC): ");
-  Serial.println(ir2);
+  // Serial.print("TC-RT5000 #1 (ADC): ");
+  // Serial.println(ir1);
+  // Serial.print("TC-RT5000 #2 (ADC): ");
+  // Serial.println(ir2);
   Serial.println();
 
   delay(1000);

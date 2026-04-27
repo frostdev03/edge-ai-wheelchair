@@ -1,100 +1,74 @@
-#include <WiFi.h>
 #include <esp_now.h>
-#include "esp_wifi.h"
-#include "esp_pm.h"
+#include <WiFi.h>
 
-/* ================= CONFIG ================= */
+// --- GANTI DENGAN MAC ADDRESS ESP32-S3 (RECEIVER) ---
+// Contoh format: {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}
+uint8_t receiverAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; 
 
-#define ESPNOW_CHANNEL 1
-#define LED 8  // Built-in LED ESP32-C3
+// Membuat struktur data yang akan dikirim
+typedef struct DataPesan {
+  int id_pesan;
+  float suhu;
+  bool status_motor;
+} DataPesan;
 
-uint8_t MACaddress[] = { 0x30, 0xED, 0xA0, 0xBD, 0x6A, 0x44 };
+// Membuat variabel dari struktur di atas
+DataPesan dataKirim;
 
-/* ================= STRUCT ================= */
+// Objek untuk menyimpan informasi *peer* (perangkat tujuan)
+esp_now_peer_info_t peerInfo;
 
-typedef struct struct_message {
-  char  a[32];
-  int   b;
-  float c;
-  char  d[32];
-  bool  e;
-} struct_message;
-
-struct_message outData;
-
-/* ================= CALLBACK ================= */
-
-void OnDataSent(const uint8_t *mac, esp_now_send_status_t status) {
-  Serial.print("Send Status: ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "SUCCESS" : "FAILED");
+// --- FUNGSI CALLBACK: Dipanggil otomatis setiap kali selesai mengirim ---
+// Fungsi ini berguna untuk mengecek apakah data berhasil sampai ke S3 atau gagal
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("\r\nStatus Pengiriman Terakhir:\t");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Berhasil Terkirim" : "Gagal Terkirim");
 }
-
-/* ================= SETUP ================= */
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
 
+  // 1. Set mode WiFi ke Station (Wajib untuk ESP-NOW)
   WiFi.mode(WIFI_STA);
-    // WiFi.disconnect(true, true);
 
-  delay(100);
-
-  esp_wifi_set_ps(WIFI_PS_NONE);   // 🔥 WIFI FULL POWER
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
-
+  // 2. Inisialisasi protokol ESP-NOW
   if (esp_now_init() != ESP_OK) {
-    Serial.println("❌ ESP-NOW init failed");
+    Serial.println("Gagal menginisialisasi ESP-NOW");
     return;
   }
 
+  // 3. Mendaftarkan fungsi Callback pengiriman
   esp_now_register_send_cb(OnDataSent);
 
-  esp_now_peer_info_t peerInfo = {};
-  memcpy(peerInfo.peer_addr, MACaddress, 6);
-  peerInfo.channel = ESPNOW_CHANNEL;
-  peerInfo.encrypt = false;
-  peerInfo.ifidx = WIFI_IF_STA;
+  // 4. Mendaftarkan Receiver (ESP32-S3) sebagai Peer
+  // Salin MAC address tujuan ke variabel peerInfo
+  memcpy(peerInfo.peer_addr, receiverAddress, 6);
+  peerInfo.channel = 0;      // Gunakan channel WiFi saat ini
+  peerInfo.encrypt = false;  // Tidak menggunakan enkripsi (untuk dasar)
 
-  esp_now_add_peer(&peerInfo);
-
-  pinMode(LED, OUTPUT);
-  Serial.println("✅ ESP-NOW READY — NO SLEEP, FULL SEND 🔥");
+  // Tambahkan peer dan cek apakah berhasil
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Gagal menambahkan peer");
+    return;
+  }
 }
-
-/* ================= LOOP ================= */
 
 void loop() {
-  static bool ledState = false;
+  // Isi data buatan untuk diuji
+  dataKirim.id_pesan = random(1, 100);
+  dataKirim.suhu = 28.5;
+  dataKirim.status_motor = true;
 
-  strcpy(outData.a, "THIS IS A CHAR");
-  strcpy(outData.d, "Hello");
-  outData.b = random(1, 20);
-  outData.c = 1.23;
-  outData.e = ledState;
+  // 5. Mengirim Data via ESP-NOW
+  // Parameter: (MAC address tujuan, alamat data, ukuran data)
+  esp_err_t hasil = esp_now_send(receiverAddress, (uint8_t *) &dataKirim, sizeof(dataKirim));
+   
+  if (hasil == ESP_OK) {
+    Serial.println("Data berhasil dikirim ke antrean ESP-NOW");
+  } else {
+    Serial.println("Gagal mengirim data");
+  }
 
-  digitalWrite(LED, ledState);
-  ledState = !ledState;
-
-  Serial.println("📤 Sending data...");
-
-  esp_err_t result = esp_now_send(
-    MACaddress,
-    (uint8_t *)&outData,
-    sizeof(outData)
-  );
-
-  // if (result != ESP_OK) {
-  //   Serial.printf("❌ Send error: %d\n", result);
-  // }
-  if (result != ESP_OK) {
-  Serial.printf(
-    "❌ Send error: %d (%s)\n",
-    result,
-    esp_err_to_name(result)
-  );
-}
-
-
-  delay(3000);
+  // Jeda 2 detik sebelum mengirim data berikutnya
+  delay(2000);
 }
