@@ -5,8 +5,8 @@
 #define TRIG2 6
 #define ECHO2 7
 
-#define TRIG3 12
-#define ECHO3 15
+#define TRIG3 8
+#define ECHO3 9
 
 // ===== TC-RT5000 Pins =====
 // #define IR1 38

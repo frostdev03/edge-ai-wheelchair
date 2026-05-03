@@ -1,7 +1,7 @@
 import serial
 # print(serial.__file__)
 
-ser = serial.Serial('COM10', 115200)
+ser = serial.Serial('COM4', 115200)
 print("Mengirim perintah mulai rekam...")
 ser.write(b'r')
 

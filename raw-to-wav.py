@@ -2,19 +2,17 @@ import wave
 import numpy as np
 
 # ==== PARAMETER AUDIO ====
-sample_rate = 16000      # contoh: 16 kHz
-num_channels = 1         # mono
-sample_width = 2         # 16-bit PCM = 2 bytes
+sample_rate = 16000      
+num_channels = 1        
+sample_width = 2        
 
-# ==== FILE ====
 input_raw = "output.raw"
-output_wav = "output.wav"
+output_wav = "kanan2.wav"
 
 print("Membaca RAW...")
 with open(input_raw, "rb") as f:
     raw_data = f.read()
 
-# Konversi raw menjadi numpy array PCM 16-bit
 audio = np.frombuffer(raw_data, dtype=np.int16)
 
 print("Menulis WAV...")
