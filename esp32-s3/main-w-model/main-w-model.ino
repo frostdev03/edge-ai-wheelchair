@@ -66,65 +66,68 @@ void TaskRakitAudio(void *pvParameters) {
     EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
 
     if (r == EI_IMPULSE_OK) {
-      float probMaju = 0, probMundur = 0, probKanan = 0, probKiri = 0, probStop = 0, probDerau = 0;
+      // float probMaju = 0, probMundur = 0, probKanan = 0, probKiri = 0, probStop = 0, probDerau = 0;
+
+      // Serial0.println("--- Hasil Prediksi ---");
+      // for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+      //   Serial0.printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
+      //   if (strcmp(result.classification[ix].label, "maju") == 0) probMaju = result.classification[ix].value;
+      //   else if (strcmp(result.classification[ix].label, "mundur") == 0) probMundur = result.classification[ix].value;
+      //   else if (strcmp(result.classification[ix].label, "kanan") == 0) probKanan = result.classification[ix].value;
+      //   else if (strcmp(result.classification[ix].label, "kiri") == 0) probKiri = result.classification[ix].value;
+      //   else if (strcmp(result.classification[ix].label, "stop") == 0) probStop = result.classification[ix].value;
+      //   else if (strcmp(result.classification[ix].label, "derau") == 0) probDerau = result.classification[ix].value;
+      // }
+      // Serial0.println("----------------------");
+
+      // String detectedCommand = "";
+      // if (probDerau > 0.75) detectedCommand = "derau";
+      // else if (probStop > 0.55) detectedCommand = "stop";
+      // else if (probMaju > 0.55) detectedCommand = "maju";
+      // else if (probMundur > 0.55) detectedCommand = "mundur";
+      // else if (probKanan > 0.55) detectedCommand = "kanan";
+      // else if (probKiri > 0.55) detectedCommand = "kiri";
+      // else detectedCommand = "";
+
+      // if (detectedCommand != "" && detectedCommand != "derau") {
+      //   Serial0.printf(">>> %s! <<<\n", detectedCommand.c_str());
+
+      //   // Lakukan aksi aktuator kursi roda di sini
+      // }
 
       Serial0.println("--- Hasil Prediksi ---");
+
+      float probTertinggi = 0.0;
+      String kelasTertinggi = "";
+      float probDerau = 0.0; // Tetap simpan derau secara terpisah jika butuh threshold beda
+
       for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
         Serial0.printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
-        if (strcmp(result.classification[ix].label, "maju") == 0) probMaju = result.classification[ix].value;
-        else if (strcmp(result.classification[ix].label, "mundur") == 0) probMundur = result.classification[ix].value;
-        else if (strcmp(result.classification[ix].label, "kanan") == 0) probKanan = result.classification[ix].value;
-        else if (strcmp(result.classification[ix].label, "kiri") == 0) probKiri = result.classification[ix].value;
-        else if (strcmp(result.classification[ix].label, "stop") == 0) probStop = result.classification[ix].value;
-        else if (strcmp(result.classification[ix].label, "derau") == 0) probDerau = result.classification[ix].value;
+
+        // Cek derau
+        if (strcmp(result.classification[ix].label, "derau") == 0) {
+            probDerau = result.classification[ix].value;
+        }
+        // Cari probabilitas tertinggi untuk kelas perintah
+        else {
+            if (result.classification[ix].value > probTertinggi) {
+                probTertinggi = result.classification[ix].value;
+                kelasTertinggi = result.classification[ix].label;
+            }
+        }
       }
       Serial0.println("----------------------");
 
       String detectedCommand = "";
-      if (probDerau > 0.75) detectedCommand = "derau";
-      else if (probStop > 0.60) detectedCommand = "stop";
-      else if (probMaju > 0.60) detectedCommand = "maju";
-      else if (probMundur > 0.60) detectedCommand = "mundur";
-      else if (probKanan > 0.60) detectedCommand = "kanan";
-      else if (probKiri > 0.60) detectedCommand = "kiri";
-      else detectedCommand = "";
 
-      // Voting logic
-      // if (detectedCommand != "" && detectedCommand != "derau") {
-        // if (detectedCommand == lastCommand) {
-        //   commandCount++;
-        //   if (commandCount >= VOTES_NEEDED) {
-        //     Serial0.printf(">>> %s! <<<\n", detectedCommand.c_str());
-        //     // lakukan aksi aktuator di sini
-        //     commandCount = 0;  // reset setelah eksekusi
-        //     lastCommand = "";  // ← tambahkan ini
-        //   }
-
-        // } else if (detectedCommand == "derau" || detectedCommand == "") {
-        //   // Tidak ada yang direset, biarkan voting tetap seperti adanya
-        //   // Tapi reset kalau sudah terlalu lama (anti false positive)
-        //   // Tidak perlu tambah kode apapun di sini
-        // } else {
-        //   lastCommand = detectedCommand;
-        //   commandCount = 1;
-        // }
-
-        // Voting 
-        if (detectedCommand == "derau" || detectedCommand == "") {
-          // gpp
-        } else if (detectedCommand == lastCommand) {
-          commandCount++;
-          if (commandCount >= VOTES_NEEDED) {
-            Serial0.printf(">>> %s! <<<\n", detectedCommand.c_str());
-            // aksi aktuator
-            commandCount = 0;  // reset 
-            lastCommand = "";
-          }
-        } else {
-          lastCommand = detectedCommand;
-          commandCount = 1;
-        }
-      
+      // Logika Penentuan Keputusan yang Adil
+      if (probDerau > 0.60) {
+          detectedCommand = "derau";
+      } else if (probTertinggi > 0.4) {
+          detectedCommand = kelasTertinggi; // Akan memilih maju/mundur/dsb yang PALING YAKIN
+      } else {
+          detectedCommand = ""; // Tidak ada yang lolos threshold
+      }
     }
 
     // Overlap 50%
