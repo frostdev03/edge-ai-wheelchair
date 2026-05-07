@@ -10,7 +10,7 @@ BAUD = 115200
 # ==== KONFIGURASI DATASET (HARDCODE) ====
 # Ubah teks di bawah ini sesuai perintah yang sedang kamu rekam massal!
 # (Contoh: "maju", "mundur", "kiri", "kanan", "stop", "derau")
-NAMA_KELAS = "derau"
+NAMA_KELAS = "kanan"
 
 # ==== PARAMETER AUDIO ====
 sample_rate = 16000      
