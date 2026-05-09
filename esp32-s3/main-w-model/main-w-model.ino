@@ -1,7 +1,10 @@
 #include <Arduino.h>
 #include <esp_now.h>
 #include <WiFi.h>
-#include <PerintahSuaraKursiRoda-ss_inferencing.h>
+// #include <PerintahSuaraKursiRoda-ss_inferencing.h>
+// #include <SmartWheelchair_inferencing.h>
+#include <SmartWheelchair-Final_inferencing.h>
+
 
 typedef struct __attribute__((packed)) AudioPacket {
   uint32_t id_paket;
@@ -43,10 +46,23 @@ void TaskRakitAudio(void *pvParameters) {
     while (bufferIndex < SAMPLE_RATE) {
       if (xQueueReceive(audioQueue, &paketDiterima, portMAX_DELAY)) {
         // Anti packet loss
+        // if (bufferIndex > 0 && paketDiterima.id_paket > last_id + 1) {
+        //   int hilang = paketDiterima.id_paket - last_id - 1;
+        //   for (int i = 0; i < hilang * 120 && bufferIndex < SAMPLE_RATE; i++) {
+        //     audioBuffer[bufferIndex++] = last_valid_sample;
+        //   }
+        // }
+
+        // Anti packet loss yang lebih aman untuk MFCC
         if (bufferIndex > 0 && paketDiterima.id_paket > last_id + 1) {
           int hilang = paketDiterima.id_paket - last_id - 1;
+
+          // Ambil nilai audio terakhir yang valid sebelum paket hilang
+          int16_t last_valid_sample = audioBuffer[bufferIndex - 1];
+
           for (int i = 0; i < hilang * 120 && bufferIndex < SAMPLE_RATE; i++) {
-            audioBuffer[bufferIndex++] = 0;
+            // Isi dengan sampel terakhir, BUKAN angka nol mutlak
+            audioBuffer[bufferIndex++] = last_valid_sample;
           }
         }
         last_id = paketDiterima.id_paket;
@@ -63,6 +79,7 @@ void TaskRakitAudio(void *pvParameters) {
     signal.get_data = &microphone_audio_signal_get_data;
     ei_impulse_result_t result = { 0 };
 
+    Serial0.println(audioBuffer[0]);
     EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
 
     if (r == EI_IMPULSE_OK) {
@@ -99,40 +116,76 @@ void TaskRakitAudio(void *pvParameters) {
 
       float probTertinggi = 0.0;
       String kelasTertinggi = "";
-      float probDerau = 0.0; // Tetap simpan derau secara terpisah jika butuh threshold beda
+      float probDerau = 0.0;  // Tetap simpan derau secara terpisah jika butuh threshold beda
+      float probUncertain = 0.0;
 
       for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-        Serial0.printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
+        float val = result.classification[ix].value;
+        const char *label = result.classification[ix].label;
 
-        // Cek derau
-        if (strcmp(result.classification[ix].label, "derau") == 0) {
-            probDerau = result.classification[ix].value;
+        Serial0.printf("    %s: %.5f\n", label, val);
+
+        if (strcmp(label, "derau") == 0) probDerau = val;
+        else if (strcmp(label, "uncertain") == 0) probUncertain = val;
+        else if (val > probTertinggi) {
+          probTertinggi = val;
+          kelasTertinggi = label;
         }
-        // Cari probabilitas tertinggi untuk kelas perintah
-        else {
-            if (result.classification[ix].value > probTertinggi) {
-                probTertinggi = result.classification[ix].value;
-                kelasTertinggi = result.classification[ix].label;
-            }
-        }
+
+        //   // Serial0.printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
+
+        //   // Cek derau
+        //   if (strcmp(result.classification[ix].label, "derau") == 0) {
+        //     probDerau = result.classification[ix].value;
+        //   }
+        //   // Cari probabilitas tertinggi untuk kelas perintah
+        //   else {
+        //     if (result.classification[ix].value > probTertinggi) {
+        //       probTertinggi = result.classification[ix].value;
+        //       kelasTertinggi = result.classification[ix].label;
+        //     }
+        //   }
+        // }
+        // Serial0.println("----------------------");
+
+        // String detectedCommand = "";
+
+        // // Logika Penentuan Keputusan yang Adil
+        // if (probDerau > 0.60) {
+        //   detectedCommand = "derau";
+        // } else if (probTertinggi > 0.4) {
+        //   detectedCommand = kelasTertinggi;  // Akan memilih maju/mundur/dsb yang PALING YAKIN
+        // } else {
+        //   detectedCommand = "";  // Tidak ada yang lolos threshold
+        // }
       }
-      Serial0.println("----------------------");
 
       String detectedCommand = "";
 
-      // Logika Penentuan Keputusan yang Adil
-      if (probDerau > 0.60) {
-          detectedCommand = "derau";
-      } else if (probTertinggi > 0.4) {
-          detectedCommand = kelasTertinggi; // Akan memilih maju/mundur/dsb yang PALING YAKIN
-      } else {
-          detectedCommand = ""; // Tidak ada yang lolos threshold
+      // Sesuai config EI: threshold 0.53
+      // if (probUncertain > 0.35) {
+      //   detectedCommand = "uncertain";  // Model ragu, abaikan
+      // } else
+      if (probDerau > 0.53) {
+        detectedCommand = "derau";
+      } else if (probTertinggi > 0.4) {  // ← Sesuai detection threshold EI
+        detectedCommand = kelasTertinggi;
       }
-    }
 
-    // Overlap 50%
-    memcpy(audioBuffer, audioBuffer + (SAMPLE_RATE / 2), (SAMPLE_RATE / 2) * sizeof(int16_t));
-    bufferIndex = SAMPLE_RATE / 2;
+      static unsigned long lastCommandTime = 0;
+      if (detectedCommand != "" && detectedCommand != "derau") {
+        unsigned long now = millis();
+        if (now - lastCommandTime > 1360) {  // ← Sesuai suppression period EI
+          // Serial0.printf(">>> PERINTAH: %s <<<\n", detectedCommand.c_str());
+          lastCommandTime = now;
+          // Aksi aktuator di sini
+        }
+      }
+
+      // Overlap 50%
+      memcpy(audioBuffer, audioBuffer + (SAMPLE_RATE / 2), (SAMPLE_RATE / 2) * sizeof(int16_t));
+      bufferIndex = SAMPLE_RATE / 2;
+    }
   }
 }
 
@@ -146,6 +199,18 @@ void setup() {
     while (1)
       ;
   }
+
+  // Debug: cek apakah audio benar-benar masuk
+  int16_t minVal = audioBuffer[0], maxVal = audioBuffer[0];
+  long sumAbs = 0;
+  for (int i = 0; i < SAMPLE_RATE; i++) {
+    if (audioBuffer[i] < minVal) minVal = audioBuffer[i];
+    if (audioBuffer[i] > maxVal) maxVal = audioBuffer[i];
+    sumAbs += abs(audioBuffer[i]);
+  }
+
+  Serial0.printf("[AUDIO] min=%d, max=%d, avgAbs=%ld\n",
+                 minVal, maxVal, sumAbs / SAMPLE_RATE);
 
   run_classifier_init();
   xTaskCreatePinnedToCore(TaskRakitAudio, "TaskAudioAI", 32768, NULL, 1, NULL, 1);

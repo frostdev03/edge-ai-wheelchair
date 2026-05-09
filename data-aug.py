@@ -43,5 +43,5 @@ def augment_dataset(input_dir, output_dir, n_augment=4):
         print(f"✅ {class_name} selesai")
 
 # Jalankan
-augment_dataset("./dataset/", "./dataset_augmented/", n_augment=1)
+augment_dataset("./dataset/", "./dataset_augmented_2/", n_augment=1)
 # 400 sampel × 5 (1 asli + 4 augmentasi) = 2000 sampel/kelas
