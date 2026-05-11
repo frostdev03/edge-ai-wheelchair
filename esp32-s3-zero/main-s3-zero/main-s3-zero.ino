@@ -132,10 +132,20 @@ void setup() {
 void loop() {
   int32_t raw_samples[120];
   size_t bytesRead = 0;
-  
+
   if (i2s_channel_read(rx_chan, raw_samples, sizeof(raw_samples), &bytesRead, portMAX_DELAY) == ESP_OK) {
     int sampleCount = bytesRead / 4;
-
+    static int printCounter = 0;
+    
+    if (++printCounter >= 133) {  // ~1 detik (133 paket × ~7.5ms)
+      int32_t maxAbs = 0;
+      for (int i = 0; i < sampleCount; i++) {
+        if (abs(raw_samples[i]) > maxAbs) maxAbs = abs(raw_samples[i]);
+      }
+      Serial.printf("[TX] raw peak: %ld, shifted peak: %d\n",
+                    maxAbs, (int16_t)(maxAbs >> 14));
+      printCounter = 0;
+    }
     // Identik dengan firmware training — >> 14, tanpa DC removal
     for (int i = 0; i < sampleCount; i++) {
       paketKirim.data_suara[i] = (int16_t)(raw_samples[i] >> 14);

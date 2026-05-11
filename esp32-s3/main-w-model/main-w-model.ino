@@ -35,9 +35,12 @@ void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, in
   }
 }
 
-String lastCommand = "";
-int commandCount = 0;
-const int VOTES_NEEDED = 2;
+// Tambah di atas TaskRakitAudio, ganti dead code lama
+#define HISTORY_SIZE 3
+static float probHistory[HISTORY_SIZE][EI_CLASSIFIER_LABEL_COUNT];
+static int historyIdx = 0;
+static int historyCount = 0;
+static int lostPackets = 0;
 
 void TaskRakitAudio(void *pvParameters) {
   AudioPacket paketDiterima;
@@ -53,9 +56,18 @@ void TaskRakitAudio(void *pvParameters) {
         //   }
         // }
 
+        static bool firstPacket = true;
+        if (firstPacket) {
+          last_id = paketDiterima.id_paket - 1;
+          firstPacket = false;
+        }
+
+
         // Anti packet loss yang lebih aman untuk MFCC
         if (bufferIndex > 0 && paketDiterima.id_paket > last_id + 1) {
           int hilang = paketDiterima.id_paket - last_id - 1;
+          lostPackets += hilang;
+
 
           // Ambil nilai audio terakhir yang valid sebelum paket hilang
           int16_t last_valid_sample = audioBuffer[bufferIndex - 1];
@@ -80,37 +92,39 @@ void TaskRakitAudio(void *pvParameters) {
     ei_impulse_result_t result = { 0 };
 
     Serial0.println(audioBuffer[0]);
+
+    int32_t sumAbs = 0;
+    int16_t peakAbs = 0;
+    for (int i = 0; i < SAMPLE_RATE; i++) {
+      int16_t a = abs(audioBuffer[i]);
+      sumAbs += a;
+      if (a > peakAbs) peakAbs = a;
+    }
+
+    Serial0.printf("[PRE-INF] avgAbs=%ld, peak=%d\n", sumAbs / SAMPLE_RATE, peakAbs);
+
+    // Software AGC — hanya aktif jika ada kemungkinan sinyal suara
+    if (peakAbs > 800) {
+      const float targetPeak = 12000.0f;
+      float gain = targetPeak / (float)peakAbs;
+      if (gain > 8.0f) gain = 8.0f;  // Cap gain maksimal 8x
+      if (gain < 0.5f) gain = 0.5f;  // Jangan attenuate terlalu jauh
+
+      for (int i = 0; i < SAMPLE_RATE; i++) {
+        int32_t s = (int32_t)((float)audioBuffer[i] * gain);
+        if (s > 32767) s = 32767;
+        if (s < -32768) s = -32768;
+        audioBuffer[i] = (int16_t)s;
+      }
+      Serial0.printf("[AGC] gain=%.2f, targetPeak=%d\n", gain, (int)targetPeak);
+    }
+
+    Serial0.printf("[LOSS] total lost per window: %d\n", lostPackets);
+    lostPackets = 0;
+
     EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
 
     if (r == EI_IMPULSE_OK) {
-      // float probMaju = 0, probMundur = 0, probKanan = 0, probKiri = 0, probStop = 0, probDerau = 0;
-
-      // Serial0.println("--- Hasil Prediksi ---");
-      // for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-      //   Serial0.printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
-      //   if (strcmp(result.classification[ix].label, "maju") == 0) probMaju = result.classification[ix].value;
-      //   else if (strcmp(result.classification[ix].label, "mundur") == 0) probMundur = result.classification[ix].value;
-      //   else if (strcmp(result.classification[ix].label, "kanan") == 0) probKanan = result.classification[ix].value;
-      //   else if (strcmp(result.classification[ix].label, "kiri") == 0) probKiri = result.classification[ix].value;
-      //   else if (strcmp(result.classification[ix].label, "stop") == 0) probStop = result.classification[ix].value;
-      //   else if (strcmp(result.classification[ix].label, "derau") == 0) probDerau = result.classification[ix].value;
-      // }
-      // Serial0.println("----------------------");
-
-      // String detectedCommand = "";
-      // if (probDerau > 0.75) detectedCommand = "derau";
-      // else if (probStop > 0.55) detectedCommand = "stop";
-      // else if (probMaju > 0.55) detectedCommand = "maju";
-      // else if (probMundur > 0.55) detectedCommand = "mundur";
-      // else if (probKanan > 0.55) detectedCommand = "kanan";
-      // else if (probKiri > 0.55) detectedCommand = "kiri";
-      // else detectedCommand = "";
-
-      // if (detectedCommand != "" && detectedCommand != "derau") {
-      //   Serial0.printf(">>> %s! <<<\n", detectedCommand.c_str());
-
-      //   // Lakukan aksi aktuator kursi roda di sini
-      // }
 
       Serial0.println("--- Hasil Prediksi ---");
 
@@ -160,13 +174,30 @@ void TaskRakitAudio(void *pvParameters) {
         // }
       }
 
+      // Simpan hasil ke history
+      for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+        probHistory[historyIdx][ix] = result.classification[ix].value;
+      }
+      historyIdx = (historyIdx + 1) % HISTORY_SIZE;
+      if (historyCount < HISTORY_SIZE) historyCount++;
+
+      // Rata-ratakan history
+      float avgDerau = 0, avgTertinggi = 0;
+      String avgKelas = "";
+      for (int h = 0; h < historyCount; h++) {
+        for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+          const char *lbl = result.classification[ix].label;  // Gunakan label dari hasil terakhir
+          // Lebih mudah: loop terpisah
+        }
+      }
+
       String detectedCommand = "";
 
       // Sesuai config EI: threshold 0.53
       // if (probUncertain > 0.35) {
       //   detectedCommand = "uncertain";  // Model ragu, abaikan
       // } else
-      if (probDerau > 0.53) {
+      if (probDerau > 0.44) {
         detectedCommand = "derau";
       } else if (probTertinggi > 0.4) {  // ← Sesuai detection threshold EI
         detectedCommand = kelasTertinggi;
@@ -199,18 +230,6 @@ void setup() {
     while (1)
       ;
   }
-
-  // Debug: cek apakah audio benar-benar masuk
-  int16_t minVal = audioBuffer[0], maxVal = audioBuffer[0];
-  long sumAbs = 0;
-  for (int i = 0; i < SAMPLE_RATE; i++) {
-    if (audioBuffer[i] < minVal) minVal = audioBuffer[i];
-    if (audioBuffer[i] > maxVal) maxVal = audioBuffer[i];
-    sumAbs += abs(audioBuffer[i]);
-  }
-
-  Serial0.printf("[AUDIO] min=%d, max=%d, avgAbs=%ld\n",
-                 minVal, maxVal, sumAbs / SAMPLE_RATE);
 
   run_classifier_init();
   xTaskCreatePinnedToCore(TaskRakitAudio, "TaskAudioAI", 32768, NULL, 1, NULL, 1);
