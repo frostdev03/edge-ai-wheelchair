@@ -3,7 +3,7 @@ import numpy as np
 from scipy.io import wavfile
 
 # Ganti dengan nama file dataset lama milikmu
-nama_file = 'kanan1.wav' 
+nama_file = 'kiri-add1.wav' 
 
 # Baca file WAV
 samplerate, data = wavfile.read(nama_file)

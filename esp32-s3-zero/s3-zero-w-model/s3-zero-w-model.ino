@@ -2,7 +2,8 @@
  */
 
 // #include <SmartWheelchair-Final_inferencing.h>
-#include "PerintahSuaraKursiRoda-ss_inferencing.h"
+// #include "PerintahSuaraKursiRoda-ss_inferencing.h"
+#include "CompletelyoWorksKeywordsSpotting_inferencing.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2s_std.h"

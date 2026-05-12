@@ -68,42 +68,42 @@ void loop() {
   }
 
   // Jika sedang merekam, baca data I2S
-  // if (isRecording) {
-  //   int32_t samples[256];
-  //   size_t bytesRead = 0;
-
-  //   // Fungsi pembacaan I2S API Baru (Menggantikan i2s_read yang lama)
-  //   if (i2s_channel_read(rx_chan, samples, sizeof(samples), &bytesRead, portMAX_DELAY) == ESP_OK) {
-
-  //     int sampleCount = bytesRead / 4; // Karena 1 sampel 32-bit = 4 Byte
-
-  //     for (int i = 0; i < sampleCount; i++) {
-  //       // Konversi 32-bit ke 16-bit
-  //       int16_t s = samples[i] >> 14;
-
-  //       // Kirim biner ke PC
-  //       Serial.write((uint8_t*)&s, 2);
-  //     }
-  //   }
-  // }
-
-  // Jika sedang merekam, baca data I2S
   if (isRecording) {
     int32_t samples[256];
     size_t bytesRead = 0;
 
+    // Fungsi pembacaan I2S API Baru (Menggantikan i2s_read yang lama)
     if (i2s_channel_read(rx_chan, samples, sizeof(samples), &bytesRead, portMAX_DELAY) == ESP_OK) {
 
-      int sampleCount = bytesRead / 4;
-      int16_t sendBuffer[256];  // Buat wadah sementara
+      int sampleCount = bytesRead / 4; // Karena 1 sampel 32-bit = 4 Byte
 
       for (int i = 0; i < sampleCount; i++) {
-        // Masukkan semua data ke wadah dulu (jangan langsung dikirim)
-        sendBuffer[i] = (int16_t)(samples[i] >> 14);
-      }
+        // Konversi 32-bit ke 16-bit
+        int16_t s = samples[i] >> 14;
 
-      // Kirim SEKALIGUS (Bulk Transfer) ke PC, ini mencegah audio patah-patah
-      Serial.write((uint8_t*)sendBuffer, sampleCount * 2);
+        // Kirim biner ke PC
+        Serial.write((uint8_t*)&s, 2);
+      }
     }
   }
+
+  // Jika sedang merekam, baca data I2S
+  // if (isRecording) {
+  //   int32_t samples[256];
+  //   size_t bytesRead = 0;
+
+  //   if (i2s_channel_read(rx_chan, samples, sizeof(samples), &bytesRead, portMAX_DELAY) == ESP_OK) {
+
+  //     int sampleCount = bytesRead / 4;
+  //     int16_t sendBuffer[256];  // Buat wadah sementara
+
+  //     for (int i = 0; i < sampleCount; i++) {
+  //       // Masukkan semua data ke wadah dulu (jangan langsung dikirim)
+  //       sendBuffer[i] = (int16_t)(samples[i] >> 14);
+  //     }
+
+  //     // Kirim SEKALIGUS (Bulk Transfer) ke PC, ini mencegah audio patah-patah
+  //     Serial.write((uint8_t*)sendBuffer, sampleCount * 2);
+  //   }
+  // }
 }
