@@ -9,8 +9,8 @@
 #define I2S_SD   7
 
 // --- PARAMETER MODEL ---
-#define ARENA_SIZE 60000 
-#define NUM_OPS    10   // Kita batasi 10 operator saja supaya hemat RAM
+#define ARENA_SIZE 100000 
+#define NUM_OPS    15   // Kita batasi 10 operator saja supaya hemat RAM
 
 i2s_chan_handle_t rx_chan;
 
@@ -27,6 +27,10 @@ tflite::MicroMutableOpResolver<NUM_OPS> MyResolver() {
     res.AddMaxPool2D();
     res.AddQuantize();
     res.AddDequantize();
+    res.AddAdd();      // Sering digunakan di arsitektur CNN modern
+    res.AddMul();      // Untuk scaling fitur
+    res.AddMean();     // Sering ada di Global Average Pooling
+    res.AddLogistic(); // Jika ada aktivasi Sigmoid
     return res;
 }
 
