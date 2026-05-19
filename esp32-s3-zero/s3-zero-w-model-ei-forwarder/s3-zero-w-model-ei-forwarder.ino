@@ -28,7 +28,8 @@
 /* Pakai filterbank int16 untuk MFCC → hemat ~10KB SRAM */
 #define EIDSP_QUANTIZE_FILTERBANK   1
 
-#include <SmartWheelchair_inferencing.h>
+//#include <SmartWheelchair_inferencing.h>
+#include <SmartWheelchairWithKeywordSpotting_inferencing.h>
 
 /* =========================================================
  * PIN CONFIG
@@ -197,14 +198,33 @@ void TaskAudioCapture(void *pvParameters)
 /* =========================================================
  * COPY SNAPSHOT
  * ========================================================= */
-void copyLatestWindow()
-{
+//void copyLatestWindow()
+//{
+//    if (xSemaphoreTake(ringMutex, pdMS_TO_TICKS(50))) {
+//        int32_t start = (int32_t)writeIndex - WIN_SAMPLES;
+//        if (start < 0) start += WIN_SAMPLES * 2;
+//
+//        for (int i = 0; i < WIN_SAMPLES; i++) {
+//            inferenceBuffer[i] = ringBuffer[(start + i) % (WIN_SAMPLES * 2)];
+//        }
+//        xSemaphoreGive(ringMutex);
+//    }
+//}
+
+void copyLatestWindow() {
     if (xSemaphoreTake(ringMutex, pdMS_TO_TICKS(50))) {
         int32_t start = (int32_t)writeIndex - WIN_SAMPLES;
         if (start < 0) start += WIN_SAMPLES * 2;
 
-        for (int i = 0; i < WIN_SAMPLES; i++) {
-            inferenceBuffer[i] = ringBuffer[(start + i) % (WIN_SAMPLES * 2)];
+        // Jika pembacaan tidak terbelah di ujung ring buffer
+        if (start + WIN_SAMPLES <= WIN_SAMPLES * 2) {
+            memcpy(inferenceBuffer, ringBuffer + start, WIN_SAMPLES * sizeof(int16_t));
+        } else {
+            // Jika terbelah, salin bagian akhir lalu sambung ke bagian awal ring buffer
+            size_t firstPart = (WIN_SAMPLES * 2) - start;
+            size_t secondPart = WIN_SAMPLES - firstPart;
+            memcpy(inferenceBuffer, ringBuffer + start, firstPart * sizeof(int16_t));
+            memcpy(inferenceBuffer + firstPart, ringBuffer, secondPart * sizeof(int16_t));
         }
         xSemaphoreGive(ringMutex);
     }
