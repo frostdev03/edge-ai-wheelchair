@@ -41,7 +41,7 @@ void setupI2S() {
 
 void setup() {
   // Gunakan Baud Rate tinggi agar tidak ada data yang tertinggal (loss)
-  Serial.begin(115200);
+  Serial.begin(2000000);
   while (!Serial);
 
   setupI2S();
