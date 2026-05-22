@@ -1,10 +1,11 @@
-#include "CompletelyoWorksKeywordsSpotting_inferencing.h"
+//#include "CompletelyoWorksKeywordsSpotting_inferencing.h"
 //#include "SmartWheelchair-Final_inferencing.h"
 //#include "SmartWheelchairWithKeywordSpotting_inferencing.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/i2s_std.h"
+#include <SmartWheelchair_inferencing.h>
 
 #define I2S_WS   9
 #define I2S_SCK  8

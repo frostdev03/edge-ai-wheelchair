@@ -1,198 +1,45 @@
-/* * ESP32-S3 Zero Continuous Keyword Spotting
- * Membaca audio dari INMP441 dan menjalankan model klasifikasi secara real-time
- */
-
-// GANTI NAMA LIBRARY INI SESUAI DENGAN HASIL EXPORT DARI EDGE IMPULSE
-#include <SmartWheelchair_inferencing.h> 
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include <Arduino.h>
 #include "driver/i2s_std.h"
+//#include <SmartWheelchair_inferencing.h> // Pastikan nama ini benar
+#include <DirectionKSP-Id_inferencing.h>
 
-// --- KONFIGURASI PINOUT S3 ZERO & AUDIO ---
-#define I2S_WS   9
-#define I2S_SCK  8
-#define I2S_SD   7
-#define GAIN_FACTOR 8
+#define EIDSP_QUANTIZE_FILTERBANK   0
+#define I2S_WS     9
+#define I2S_SCK    8
+#define I2S_SD     7
 
-/** Audio buffers, pointers and selectors */
-typedef struct {
-    signed short *buffers[2];
-    unsigned char buf_select;
-    unsigned char buf_ready;
-    unsigned int buf_count;
-    unsigned int n_samples;
-} inference_t;
+#define SAMPLE_RATE   EI_CLASSIFIER_FREQUENCY
+#define WIN_SAMPLES   EI_CLASSIFIER_RAW_SAMPLE_COUNT
+#define GAIN_FACTOR   8
+#define CHUNK_SAMPLES 512
 
-static inference_t inference;
-static const uint32_t sample_buffer_size = 2048;
-static signed short sampleBuffer[sample_buffer_size];
-static bool debug_nn = false;
-static int print_results = -(EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW);
-static bool record_status = true;
+static int16_t *ringBuffer      = nullptr;
+static int16_t *inferenceBuffer = nullptr;
+static volatile uint32_t writeIndex = 0;
 
-i2s_chan_handle_t rx_chan; // Handle I2S standar baru
+SemaphoreHandle_t ringMutex;
+i2s_chan_handle_t rx_chan;
 
-// Deklarasi fungsi
-static bool microphone_inference_start(uint32_t n_samples);
-static bool microphone_inference_record(void);
-static int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr);
-static void microphone_inference_end(void);
-static int i2s_init_custom(uint32_t sampling_rate);
-static int i2s_deinit_custom(void);
-
-void setup() {
-    Serial.begin(115200);
-    while (!Serial);
-    Serial.println("Edge Impulse Continuous Inferencing Demo - ESP32-S3 Zero");
-
-    // Ringkasan konfigurasi model
-    ei_printf("Inferencing settings:\n");
-    ei_printf("\tInterval: %.2f ms.\n", (float)EI_CLASSIFIER_INTERVAL_MS);
-    ei_printf("\tFrame size: %d\n", EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE);
-    ei_printf("\tSample length: %d ms.\n", EI_CLASSIFIER_RAW_SAMPLE_COUNT / 16);
-    ei_printf("\tNo. of classes: %d\n", sizeof(ei_classifier_inferencing_categories) / sizeof(ei_classifier_inferencing_categories[0]));
-
-    run_classifier_init();
-    ei_printf("\nStarting continuous inference in 2 seconds...\n");
-    ei_sleep(2000);
-
-    if (microphone_inference_start(EI_CLASSIFIER_SLICE_SIZE) == false) {
-        ei_printf("ERR: Could not allocate audio buffer. Check memory.\n");
-        return;
-    }
-    ei_printf("Sistem Siap. Mulai berbicara...\n");
-}
-
-void loop() {
-    bool m = microphone_inference_record();
-    if (!m) {
-        ei_printf("ERR: Failed to record audio...\n");
-        return;
-    }
-
-    signal_t signal;
-    signal.total_length = EI_CLASSIFIER_SLICE_SIZE;
-    signal.get_data = &microphone_audio_signal_get_data;
-    ei_impulse_result_t result = {0};
-
-    // Eksekusi klasifikasi
-    EI_IMPULSE_ERROR r = run_classifier_continuous(&signal, &result, debug_nn);
-    if (r != EI_IMPULSE_OK) {
-        ei_printf("ERR: Failed to run classifier (%d)\n", r);
-        return;
-    }
-
-    // Tampilkan hasil saat 1 jendela waktu penuh tercapai
-    if (++print_results >= (EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW)) {
-        ei_printf("\n--- Hasil Prediksi ---\n");
-        for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-            ei_printf("%10s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
-        }
-        print_results = 0;
-    }
-}
-
-// Callback untuk memasukkan data yang sudah di-scale ke buffer EI
-static void audio_inference_callback(uint32_t n_bytes) {
-    for(int i = 0; i < n_bytes>>1; i++) {
-        inference.buffers[inference.buf_select][inference.buf_count++] = sampleBuffer[i];
-        if(inference.buf_count >= inference.n_samples) {
-            inference.buf_select ^= 1;
-            inference.buf_count = 0;
-            inference.buf_ready = 1;
-        }
-    }
-}
-
-// Task RTOS untuk mengambil sampel dari perangkat keras mikrofon
-static void capture_samples(void* arg) {
-    const int32_t SAMPLES_PER_READ = 512;
-    int32_t raw_samples[SAMPLES_PER_READ];
-    size_t bytes_read = 0;
-
-    while (record_status) {
-        if (i2s_channel_read(rx_chan, raw_samples, sizeof(raw_samples), &bytes_read, portMAX_DELAY) == ESP_OK) {
-            int sampleCount = bytes_read / 4; 
-            for (int i = 0; i < sampleCount; i++) {
-                // Konversi format I2S (32-bit) ke format yang dikenali EI (16-bit PCM)
-                int32_t pcm16 = (raw_samples[i] >> 14) * GAIN_FACTOR;
-                
-                // Mencegah overflow sinyal (clipping)
-                if (pcm16 > 32767) pcm16 = 32767;
-                if (pcm16 < -32768) pcm16 = -32768;
-                
-                sampleBuffer[i] = (int16_t)pcm16;
-            }
-
-            if (record_status) {
-                audio_inference_callback(sampleCount * 2); 
-            } else {
-                break;
-            }
-        }
-    }
-    vTaskDelete(NULL);
-}
-
-static bool microphone_inference_start(uint32_t n_samples) {
-    inference.buffers[0] = (signed short *)malloc(n_samples * sizeof(signed short));
-    if (inference.buffers[0] == NULL) return false;
-
-    inference.buffers[1] = (signed short *)malloc(n_samples * sizeof(signed short));
-    if (inference.buffers[1] == NULL) {
-        ei_free(inference.buffers[0]);
+static bool checkPSRAM() {
+    if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) {
+        Serial.println("[ERR] PSRAM tidak terdeteksi!");
         return false;
     }
-
-    inference.buf_select = 0;
-    inference.buf_count = 0;
-    inference.n_samples = n_samples;
-    inference.buf_ready = 0;
-
-    if (i2s_init_custom(EI_CLASSIFIER_FREQUENCY)) {
-        ei_printf("Gagal menginisialisasi I2S!\n");
-        return false;
-    }
-
-    ei_sleep(100);
-    record_status = true;
-    
-    // Menjalankan proses pembacaan audio di background (core)
-    xTaskCreate(capture_samples, "CaptureSamples", 1024 * 32, NULL, 10, NULL);
-    return true;
-}
-
-static bool microphone_inference_record(void) {
-    if (inference.buf_ready == 1) {
-        ei_printf("Error: sample buffer overrun.\n");
-        return false;
-    }
-    while (inference.buf_ready == 0) {
-        delay(1);
-    }
-    inference.buf_ready = 0;
     return true;
 }
 
 static int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr) {
-    numpy::int16_to_float(&inference.buffers[inference.buf_select ^ 1][offset], out_ptr, length);
+    if ((offset + length) > (size_t)WIN_SAMPLES) return -1;
+    numpy::int16_to_float(inferenceBuffer + offset, out_ptr, length);
     return 0;
 }
 
-static void microphone_inference_end(void) {
-    i2s_deinit_custom();
-    ei_free(inference.buffers[0]);
-    ei_free(inference.buffers[1]);
-}
+void setupI2S() {
+    i2s_chan_config_t rx_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
+    ESP_ERROR_CHECK(i2s_new_channel(&rx_cfg, NULL, &rx_chan));
 
-// Inisialisasi menggunakan API i2s_std.h
-static int i2s_init_custom(uint32_t sampling_rate) {
-    i2s_chan_config_t rx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
-    if (i2s_new_channel(&rx_chan_cfg, NULL, &rx_chan) != ESP_OK) return 1;
-
-    i2s_std_config_t rx_std_cfg = {
-        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(sampling_rate),
+    i2s_std_config_t rx_std = {
+        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
@@ -203,16 +50,126 @@ static int i2s_init_custom(uint32_t sampling_rate) {
             .invert_flags = { false, false, false },
         },
     };
-    rx_std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
-
-    if (i2s_channel_init_std_mode(rx_chan, &rx_std_cfg) != ESP_OK) return 1;
-    if (i2s_channel_enable(rx_chan) != ESP_OK) return 1;
-
-    return 0;
+    rx_std.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_chan, &rx_std));
+    ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
 }
 
-static int i2s_deinit_custom(void) {
-    i2s_channel_disable(rx_chan);
-    i2s_del_channel(rx_chan);
-    return 0;
+void TaskAudioCapture(void *pvParameters) {
+    int32_t raw[CHUNK_SAMPLES];
+    while (1) {
+        size_t bytes_read = 0;
+        esp_err_t ret = i2s_channel_read(rx_chan, raw, sizeof(raw), &bytes_read, pdMS_TO_TICKS(100));
+        if (ret != ESP_OK || bytes_read == 0) continue;
+
+        int n = bytes_read / 4;
+        if (xSemaphoreTake(ringMutex, pdMS_TO_TICKS(10))) {
+            for (int i = 0; i < n; i++) {
+                int32_t s = (int32_t)(raw[i] >> 14) * GAIN_FACTOR;
+                if (s > 32767) s = 32767;
+                if (s < -32768) s = -32768;
+                ringBuffer[writeIndex] = (int16_t)s;
+                if (++writeIndex >= (uint32_t)(WIN_SAMPLES * 2)) writeIndex = 0;
+            }
+            xSemaphoreGive(ringMutex);
+        }
+    }
+}
+
+void copyLatestWindow() {
+    if (xSemaphoreTake(ringMutex, pdMS_TO_TICKS(50))) {
+        int32_t start = (int32_t)writeIndex - WIN_SAMPLES;
+        if (start < 0) start += WIN_SAMPLES * 2;
+
+        if (start + WIN_SAMPLES <= WIN_SAMPLES * 2) {
+            memcpy(inferenceBuffer, ringBuffer + start, WIN_SAMPLES * sizeof(int16_t));
+        } else {
+            size_t firstPart = (WIN_SAMPLES * 2) - start;
+            size_t secondPart = WIN_SAMPLES - firstPart;
+            memcpy(inferenceBuffer, ringBuffer + start, firstPart * sizeof(int16_t));
+            memcpy(inferenceBuffer + firstPart, ringBuffer, secondPart * sizeof(int16_t));
+        }
+        xSemaphoreGive(ringMutex);
+    }
+}
+
+void TaskInference(void *pvParameters) {
+    vTaskDelay(pdMS_TO_TICKS(1500)); // Tunggu buffer penuh di awal
+
+    while (1) {
+        copyLatestWindow();
+
+        int sampelVAD = SAMPLE_RATE / 10; // Cek 100ms terakhir
+        int32_t sumAbs = 0;
+        for (int i = WIN_SAMPLES - sampelVAD; i < WIN_SAMPLES; i++) {
+            sumAbs += abs(inferenceBuffer[i]);
+        }
+        int32_t avgAbs = sumAbs / sampelVAD;
+
+        if (avgAbs < 1000) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        Serial.printf("\n[DEBUG] TRIGGER VAD! Vol puncak: %ld\n", avgAbs);
+        Serial.println("[DEBUG] Menunggu 400ms agar ekor kata masuk buffer...");
+        
+        // Jeda waktu ini memastikan kata berada di tengah window
+        vTaskDelay(pdMS_TO_TICKS(500));
+        copyLatestWindow();
+
+        // --- DEBUGGING ALIGNMENT ---
+        // Cek volume 100ms di awal window (seharusnya hening/suara huruf konsonan pelan)
+        int32_t onsetSum = 0;
+        for (int i = 0; i < sampelVAD; i++) {
+             onsetSum += abs(inferenceBuffer[i]);
+        }
+        Serial.printf("[DEBUG] Vol awal window (100ms pertama): %ld\n", onsetSum / sampelVAD);
+        Serial.println("[AI] Eksekusi MFCC & CNN...");
+
+        signal_t signal;
+        signal.total_length = WIN_SAMPLES;
+        signal.get_data     = &microphone_audio_signal_get_data;
+        ei_impulse_result_t result = { 0 };
+
+        EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
+
+        if (r != EI_IMPULSE_OK) {
+            Serial.printf("[ERR] Classifier gagal: %d\n", r);
+        } else {
+            Serial.println("--- Hasil Prediksi ---");
+            for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+                Serial.printf("  %-8s : %.4f\n", result.classification[ix].label, result.classification[ix].value);
+            }
+            Serial.println("----------------------");
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(600)); // Cooldown
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(2000);
+
+    Serial.println("\n=================================");
+    Serial.println("Sistem Kendali Suara - Ring Buffer Debug");
+    Serial.println("=================================\n");
+
+    if (!checkPSRAM()) { while (1) delay(1000); }
+
+    ringBuffer = (int16_t*)heap_caps_malloc(WIN_SAMPLES * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    inferenceBuffer = (int16_t*)heap_caps_malloc(WIN_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    memset(ringBuffer, 0, WIN_SAMPLES * 2 * sizeof(int16_t));
+    memset(inferenceBuffer, 0, WIN_SAMPLES * sizeof(int16_t));
+
+    setupI2S();
+    ringMutex = xSemaphoreCreateMutex();
+
+    xTaskCreatePinnedToCore(TaskInference, "Inference", 32768, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(TaskAudioCapture, "AudioCapture", 8192, NULL, 3, NULL, 0);
+}
+
+void loop() {
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
