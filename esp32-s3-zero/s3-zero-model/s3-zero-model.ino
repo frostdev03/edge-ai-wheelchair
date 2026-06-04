@@ -1,7 +1,8 @@
 #include <Arduino.h>
 #include "driver/i2s_std.h"
 //#include <SmartWheelchair_inferencing.h> // Pastikan nama ini benar
-#include <DirectionKSP-Id_inferencing.h>
+//#include <DirectionKSP-Id_inferencing.h>
+#include <KeywordSpottingDirectionIndonesia_inferencing.h>
 
 #define EIDSP_QUANTIZE_FILTERBANK   0
 #define I2S_WS     9
