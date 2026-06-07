@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include "driver/i2s_std.h"
-//#include <SmartWheelchair_inferencing.h> // Pastikan nama ini benar
-//#include <DirectionKSP-Id_inferencing.h>
+// Pastikan nama library Edge Impulse-mu benar!
 #include <KeywordSpottingDirectionIndonesia_inferencing.h>
 
 #define EIDSP_QUANTIZE_FILTERBANK   0
@@ -56,6 +55,9 @@ void setupI2S() {
     ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
 }
 
+// ==========================================================
+// CORE 0: MEREKAM AUDIO NON-STOP KE DALAM PSRAM
+// ==========================================================
 void TaskAudioCapture(void *pvParameters) {
     int32_t raw[CHUNK_SAMPLES];
     while (1) {
@@ -77,6 +79,7 @@ void TaskAudioCapture(void *pvParameters) {
     }
 }
 
+// Fungsi untuk menjepret 1 detik terakhir dari memori
 void copyLatestWindow() {
     if (xSemaphoreTake(ringMutex, pdMS_TO_TICKS(50))) {
         int32_t start = (int32_t)writeIndex - WIN_SAMPLES;
@@ -94,39 +97,15 @@ void copyLatestWindow() {
     }
 }
 
+// ==========================================================
+// CORE 1: INFERENSI KONTINU (MENGGANTIKAN VAD)
+// ==========================================================
 void TaskInference(void *pvParameters) {
-    vTaskDelay(pdMS_TO_TICKS(1500)); // Tunggu buffer penuh di awal
+    vTaskDelay(pdMS_TO_TICKS(1500)); // Tunggu ring buffer terisi penuh di awal
 
     while (1) {
+        // Langsung jepret 1 detik terakhir tanpa VAD
         copyLatestWindow();
-
-        int sampelVAD = SAMPLE_RATE / 10; // Cek 100ms terakhir
-        int32_t sumAbs = 0;
-        for (int i = WIN_SAMPLES - sampelVAD; i < WIN_SAMPLES; i++) {
-            sumAbs += abs(inferenceBuffer[i]);
-        }
-        int32_t avgAbs = sumAbs / sampelVAD;
-
-        if (avgAbs < 1200) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-
-        Serial.printf("\n[DEBUG] TRIGGER VAD! Vol puncak: %ld\n", avgAbs);
-        Serial.println("[DEBUG] Menunggu 400ms agar ekor kata masuk buffer...");
-        
-        // Jeda waktu ini memastikan kata berada di tengah window
-        vTaskDelay(pdMS_TO_TICKS(500));
-        copyLatestWindow();
-
-        // --- DEBUGGING ALIGNMENT ---
-        // Cek volume 100ms di awal window (seharusnya hening/suara huruf konsonan pelan)
-        int32_t onsetSum = 0;
-        for (int i = 0; i < sampelVAD; i++) {
-             onsetSum += abs(inferenceBuffer[i]);
-        }
-        Serial.printf("[DEBUG] Vol awal window (100ms pertama): %ld\n", onsetSum / sampelVAD);
-        Serial.println("[AI] Eksekusi MFCC & CNN...");
 
         signal_t signal;
         signal.total_length = WIN_SAMPLES;
@@ -138,14 +117,31 @@ void TaskInference(void *pvParameters) {
         if (r != EI_IMPULSE_OK) {
             Serial.printf("[ERR] Classifier gagal: %d\n", r);
         } else {
-            Serial.println("--- Hasil Prediksi ---");
-            for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-                Serial.printf("  %-8s : %.4f\n", result.classification[ix].label, result.classification[ix].value);
-            }
-            Serial.println("----------------------");
-        }
+            // Cari kelas dengan probabilitas tertinggi
+            float probTertinggi = 0.0;
+            const char* kelasTertinggi = "";
 
-        vTaskDelay(pdMS_TO_TICKS(600)); // Cooldown
+            for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+                if (result.classification[ix].value > probTertinggi) {
+                    probTertinggi = result.classification[ix].value;
+                    kelasTertinggi = result.classification[ix].label;
+                }
+            }
+
+            // LOGIKA SLIDING WINDOW:
+            // Jika AI sangat yakin (> 0.80) dan tebakannya BUKAN derau
+            if (strcmp(kelasTertinggi, "derau") != 0 && probTertinggi > 0.60) {
+                Serial.printf("\n[%.2f] >> PERINTAH DITERIMA: %s <<\n", probTertinggi, kelasTertinggi);
+                
+                // Beri jeda 1 detik agar kursi roda tidak menerima spaming perintah yang sama
+                // dari pantulan kata di window berikutnya
+                vTaskDelay(pdMS_TO_TICKS(1000)); 
+            } else {
+                // Jika isinya hanya derau/hening, geser jendela waktu maju 250ms
+                // Ini memastikan kata "kanan" atau "stop" pasti akan jatuh pas di tengah window
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+        }
     }
 }
 
@@ -153,12 +149,13 @@ void setup() {
     Serial.begin(115200);
     delay(2000);
 
-    Serial.println("\n=================================");
-    Serial.println("Sistem Kendali Suara - Ring Buffer Debug");
-    Serial.println("=================================\n");
+    Serial.println("\n=============================================");
+    Serial.println(" Sistem Kendali Suara - Continuous AI Mode");
+    Serial.println("=============================================\n");
 
     if (!checkPSRAM()) { while (1) delay(1000); }
 
+    // Alokasi memori di RAM Eksternal
     ringBuffer = (int16_t*)heap_caps_malloc(WIN_SAMPLES * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     inferenceBuffer = (int16_t*)heap_caps_malloc(WIN_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     memset(ringBuffer, 0, WIN_SAMPLES * 2 * sizeof(int16_t));
@@ -167,6 +164,7 @@ void setup() {
     setupI2S();
     ringMutex = xSemaphoreCreateMutex();
 
+    // Memecah beban: Merekam di Core 0, Berpikir (AI) di Core 1
     xTaskCreatePinnedToCore(TaskInference, "Inference", 32768, NULL, 1, NULL, 1);
     xTaskCreatePinnedToCore(TaskAudioCapture, "AudioCapture", 8192, NULL, 3, NULL, 0);
 }
