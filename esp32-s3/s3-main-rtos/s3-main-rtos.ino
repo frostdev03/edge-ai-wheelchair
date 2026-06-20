@@ -1,81 +1,102 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SH110X.h>
+#include <Adafruit_SSD1306.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include "esp_wifi.h"
 
-// ===================== PIN CONFIGURATION =====================
-// Motor Kanan (Berdasarkan skematik motor-testing.ino)
-const int RPWM_R = 10; // [cite: 1]
-const int LPWM_R = 11; // [cite: 1]
+// ===== KONFIGURASI PIN HARDWARE =====
+const int RPWM_R = 12; // Motor Kanan
+const int LPWM_R = 13;
+const int RPWM_L = 10; // Motor Kiri
+const int LPWM_L = 11;
 
-// Motor Kiri (Berdasarkan skematik motor-testing.ino)
-const int RPWM_L = 12; // [cite: 2]
-const int LPWM_L = 13; // [cite: 2]
+#define IR_L 14       // TCRT5000 Kiri (Sesuai klarifikasi)
+#define IR_R 15       // TCRT5000 Kanan (Sesuai klarifikasi)
 
-// Sensor IR TC-RT5000 (Berdasarkan sensors.ino)
-#define IR1 14 // 
-#define IR2 15 // 
+#define I2C_SDA 1     // Jalur OLED 0.96"
+#define I2C_SCL 2
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
 
-// OLED I2C Pins (Sudah dipindah ke Pin 1 & 2 agar tidak bentrok)
-#define I2C_SDA 1 
-#define I2C_SCL 2 
-#define SCREEN_WIDTH 128 // [cite: 23]
-#define SCREEN_HEIGHT 64 // [cite: 23]
+#define TRIG_RANYA 5  // Ultrasonik Kanan
+#define ECHO_RANYA 4
+#define TRIG_KIRI  6  // Ultrasonik Kiri
+#define ECHO_KIRI  7
+#define TRIG_BKNG  8  // Ultrasonik Belakang
+#define ECHO_BKNG  9
 
-// Sensor Ultrasonik HC-SR04 (Kembali ke Pin 4 & 5 bawaan sensors.ino)
-#define TRIG1 4  // 
-#define ECHO1 5  // 
-#define TRIG2 6  // 
-#define ECHO2 7  // 
-#define TRIG3 8  // 
-#define ECHO3 9  // 
+SemaphoreHandle_t i2cMutex;
 
-// ===================== GLOBAL VARIABLES & ENUMS =====================
-const int MIN_SPEED = 50; // [cite: 3]
+// ===== VARIABEL PENGUJI RESPON TRANSIEN =====
+bool testing_transient = false;
+unsigned long start_test_time = 0;
+float peak_speed_L = 0.0;
+float peak_speed_R = 0.0;
 
-// Definisi ID Perintah (Wajib sama persis dengan sisi Transmitter/S3 Zero)
-enum CommandID {
-    CMD_DIAM   = 0,
-    CMD_MAJU   = 1,
-    CMD_MUNDUR = 2,
-    CMD_KIRI   = 3,
-    CMD_KANAN  = 4,
-    CMD_STOP   = 5
-};
+// Parameter Hasil untuk Tabel Buku TA
+float tr_L = 0.0, tr_R = 0.0; 
+float mp_L = 0.0, mp_R = 0.0; 
+float ts_L = 0.0, ts_R = 0.0; 
+float ess_L = 0.0, ess_R = 0.0; 
 
-// Struktur paket data ESP-NOW
+// ===== PARAMETER FISIK KURSI RODA AKTUAL =====
+const float WHEEL_DIAMETER = 0.60;     // Diameter roda aktual 60 cm
+const int PULSES_PER_REV = 1;          // 1 Titik isolasi putih di roda
+const float TARGET_SPEED_KMH = 4.0;    // Setpoint maksimal 4 km/jam
+
+// ===== ENUMERASI PERINTAH =====
+enum CommandID { CMD_DIAM = 0, CMD_MAJU = 1, CMD_MUNDUR = 2, CMD_KIRI = 3, CMD_KANAN = 4, CMD_STOP = 5 };
+enum Direction { STOPPED, CW, CCW };
+
 typedef struct struct_message {
-    uint8_t command;   
-    uint32_t msg_id;   
-} struct_message;
+  uint8_t command;
+  uint32_t msg_id;
+} __attribute__((packed)) struct_message;
 
 struct_message incomingData;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// Shared Resources antar-Task
-volatile int global_ir1_value = 0;
-volatile int global_ir2_value = 0;
-volatile long global_dist1 = 0;
-volatile long global_dist2 = 0;
-volatile long global_dist3 = 0;
+// ===== VARIABEL GLOBAL (SHARED RESOURCES) =====
+volatile long dist_right = 0, dist_left = 0, dist_back = 0;
+volatile bool safety_stop_active = false;
+volatile int current_command = CMD_DIAM;
 
-volatile int target_speed_left = 0;
-volatile int target_speed_right = 0;
-volatile uint32_t last_received_msg_id = 0;
+volatile unsigned long pulse_count_L = 0;
+volatile unsigned long pulse_count_R = 0;
+volatile float speed_L_kmh = 0.0;
+volatile float speed_R_kmh = 0.0;
+Direction R_Rotation = STOPPED;
+Direction L_Rotation = STOPPED;
 
-// Deklarasi Layar OLED SH1106
-Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1); // [cite: 23]
+float setpoint_L = 0.0;
+float setpoint_R = 0.0;
+float ramped_speed_L = 0.0;
+float ramped_speed_R = 0.0;
 
-// FreeRTOS Task Handles
-TaskHandle_t TaskSensorsOLEDHandle = NULL;
-TaskHandle_t TaskMotorPIDHandle    = NULL;
-TaskHandle_t TaskESPNowHandle      = NULL;
+// ===== PEKERJAAN INTERRUPT DENGAN PROTEKSI DEBOUNCING =====
+void IRAM_ATTR countPulseL() {
+  static unsigned long last_interrupt_time_L = 0;
+  unsigned long interrupt_time = millis();
+  if (interrupt_time - last_interrupt_time_L > 150) {
+    pulse_count_L++;
+    last_interrupt_time_L = interrupt_time;
+  }
+}
 
-// ===================== HELPER FUNCTIONS =====================
+void IRAM_ATTR countPulseR() {
+  static unsigned long last_interrupt_time_R = 0;
+  unsigned long interrupt_time = millis();
+  if (interrupt_time - last_interrupt_time_R > 150) {
+    pulse_count_R++;
+    last_interrupt_time_R = interrupt_time;
+  }
+}
+
+// ===== FUNGSI PENGGERAK MOTOR =====
 void setMotorSpeed(int speed, int rpwmPin, int lpwmPin) {
   speed = constrain(speed, -255, 255);
-  
   if (speed >= 0) {
     analogWrite(rpwmPin, speed);
     analogWrite(lpwmPin, 0);
@@ -85,178 +106,253 @@ void setMotorSpeed(int speed, int rpwmPin, int lpwmPin) {
   }
 }
 
+// ===== FUNGSI BACA ULTRASONIK =====
 long readUltrasonicCM(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);  delayMicroseconds(5);
+  digitalWrite(trigPin, HIGH); delayMicroseconds(12);
   digitalWrite(trigPin, LOW);
-  delayMicroseconds(2); // [cite: 11]
-  digitalWrite(trigPin, HIGH); // [cite: 11]
-  delayMicroseconds(10); // [cite: 11]
-  digitalWrite(trigPin, LOW); // [cite: 11]
-
-  long duration = pulseIn(echoPin, HIGH, 30000);  // [cite: 12]
-  if (duration == 0) return -1; // [cite: 12, 13]
-  return duration / 58; // [cite: 13]
+  long duration = pulseIn(echoPin, HIGH, 35000);
+  if (duration == 0) return 400;
+  return duration / 58;
 }
 
-// 🔥 CALLBACK ESP-NOW VERSI ARDUINO CORE 3.0+
+// ===== ESP-NOW RECEIVER CALLBACK =====
 void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
-    // Menyalin data mentah yang masuk ke dalam struktur data incomingData
-    memcpy(&incomingData, data, sizeof(incomingData));
-    
-    // Simpan ID pesan terakhir sebagai penanda ada data baru masuk
-    last_received_msg_id = incomingData.msg_id;
+  memcpy(&incomingData, data, sizeof(incomingData));
+  current_command = incomingData.command;
 
-    // Logika penerjemahan ID perintah ke target kecepatan motor
-    switch (incomingData.command) {
-        case CMD_MAJU:
-            target_speed_left = MIN_SPEED;
-            target_speed_right = MIN_SPEED;
-            break;
-            
-        case CMD_MUNDUR:
-            target_speed_left = -MIN_SPEED;
-            target_speed_right = -MIN_SPEED;
-            break;
-            
-        case CMD_KIRI:
-            // Roda kiri mundur/diam, roda kanan maju agar berbelok ke kiri
-            target_speed_left = -MIN_SPEED;
-            target_speed_right = MIN_SPEED;
-            break;
-            
-        case CMD_KANAN:
-            // Roda kiri maju, roda kanan mundur/diam agar berbelok ke kanan
-            target_speed_left = MIN_SPEED;
-            target_speed_right = -MIN_SPEED;
-            break;
-            
-        case CMD_STOP:
-        case CMD_DIAM:
-        default:
-            target_speed_left = 0;
-            target_speed_right = 0;
-            break;
-    }
+  if (safety_stop_active) return;
+
+  switch (current_command) {
+    case CMD_MAJU:
+      setpoint_L = TARGET_SPEED_KMH; setpoint_R = TARGET_SPEED_KMH;
+      break;
+    case CMD_MUNDUR:
+      setpoint_L = -TARGET_SPEED_KMH; setpoint_R = -TARGET_SPEED_KMH;
+      break;
+    case CMD_KIRI:  
+      setpoint_L = -(TARGET_SPEED_KMH * 0.6); setpoint_R = (TARGET_SPEED_KMH * 0.6);
+      break;
+    case CMD_KANAN: 
+      setpoint_L = (TARGET_SPEED_KMH * 0.6); setpoint_R = -(TARGET_SPEED_KMH * 0.6);
+      break;
+    case CMD_STOP:
+    case CMD_DIAM:
+    default:
+      setpoint_L = 0; setpoint_R = 0;
+      break;
+  }
 }
 
-// ===================== RTOS TASKS IMPLEMENTATION =====================
+// ===== FREE RTOS TASK IMPLEMENTATION =====
 
-// 1. TASK SENSORS & OLED (Core 0)
-void TaskSensorsOLED(void *pvParameters) {
-  (void) pvParameters;
-
-  Wire.begin(I2C_SDA, I2C_SCL);
-  vTaskDelay(pdMS_TO_TICKS(500));
-
-  if(!display.begin(0x3C, true)) {
-    Serial0.println(F("SH1106 allocation failed"));
-    for(;;); 
-  }
-  
-  display.clearDisplay();
-  display.setTextSize(1);      
-  display.setTextColor(SH110X_WHITE);
-  display.setCursor(0, 0);
-  display.println("Receiver Ready...");
-  display.display();
-
+// 1. Sensor & Safety Emergency Stop (Core 0)
+void TaskSensors(void *pvParameters) {
   for (;;) {
-    global_ir1_value = digitalRead(IR1); // [cite: 18]
-    global_ir2_value = digitalRead(IR2); // [cite: 18]
+    dist_right = readUltrasonicCM(TRIG_RANYA, ECHO_RANYA); vTaskDelay(pdMS_TO_TICKS(20));
+    dist_left  = readUltrasonicCM(TRIG_KIRI, ECHO_KIRI);   vTaskDelay(pdMS_TO_TICKS(20));
+    dist_back  = readUltrasonicCM(TRIG_BKNG, ECHO_BKNG);   vTaskDelay(pdMS_TO_TICKS(20));
 
-    global_dist1 = readUltrasonicCM(TRIG1, ECHO1);
-    global_dist2 = readUltrasonicCM(TRIG2, ECHO2);
-    global_dist3 = readUltrasonicCM(TRIG3, ECHO3);
-
-    // Render data ke OLED
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SH110X_WHITE);
-    
-    display.setCursor(0, 0);
-    display.printf("IR1: %d | IR2: %d\n", global_ir1_value, global_ir2_value);
-    
-    display.setCursor(0, 12);
-    display.printf("US1 (Kiri) : %ld cm\n", global_dist1);
-    display.setCursor(0, 24);
-    display.printf("US2 (Depan): %ld cm\n", global_dist2);
-    display.setCursor(0, 36);
-    display.printf("US3 (Kanan): %ld cm\n", global_dist3);
-    
-    display.setCursor(0, 52);
-    display.printf("L: %d | R: %d (ID:%ld)\n", target_speed_left, target_speed_right, last_received_msg_id);
-    
-    display.display();
-
-    vTaskDelay(pdMS_TO_TICKS(200));
+    // Cek emergency stop jika ada sensor memotret jarak <= 30cm
+    if ((dist_right > 0 && dist_right <= 30) || (dist_left > 0 && dist_left <= 30) || (dist_back > 0 && dist_back <= 30)) {
+      if (!safety_stop_active) {
+        safety_stop_active = true;
+        setpoint_L = 0; setpoint_R = 0;
+      }
+    } else {
+      safety_stop_active = false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
-// 2. TASK MOTOR & PID (Core 1)
+// 2. Real-Time PID & Analisis Transien (Core 1)
 void TaskMotorPID(void *pvParameters) {
   (void) pvParameters;
+  unsigned long last_time = millis();
+
+  static float Kp = 5.0, Ki = 0.2, Kd = 0.5;
+  static float integral_L = 0.0, integral_R = 0.0;
+  static float last_err_L = 0.0, last_err_R = 0.0;
+
+  float KOMPENSASI_PWM_KANAN = 0.75; 
+  float KOMPENSASI_PWM_KIRI  = 1.00; 
 
   for (;;) {
-    /* [TEMPAT CODING PID BESOK SIANG] */
-    
-    // Kompensasi arah fisik: motor kiri diberi nilai normal (+), motor kanan dibalik (-) secara programmatic
-    setMotorSpeed(target_speed_left, RPWM_L, LPWM_L); 
-    setMotorSpeed(-target_speed_right, RPWM_R, LPWM_R); 
+    unsigned long now = millis();
+    float dt = (now - last_time) / 1000.0;
+    if (dt <= 0.0) dt = 0.04;
 
-    vTaskDelay(pdMS_TO_TICKS(50));
+    noInterrupts();
+    unsigned long p_L = pulse_count_L; pulse_count_L = 0;
+    unsigned long p_R = pulse_count_R; pulse_count_R = 0;
+    interrupts();
+
+    speed_L_kmh = ((float)p_L / PULSES_PER_REV) * 3.14159 * WHEEL_DIAMETER * (3.6 / dt);
+    speed_R_kmh = ((float)p_R / PULSES_PER_REV) * 3.14159 * WHEEL_DIAMETER * (3.6 / dt);
+    last_time = now;
+
+    float target_steady = 4.0;
+    float rise_threshold = target_steady * 0.9; 
+
+    if (current_command == CMD_MAJU && !testing_transient && speed_L_kmh < 0.2 && speed_R_kmh < 0.2) {
+      testing_transient = true;
+      start_test_time = millis();
+      peak_speed_L = 0.0; peak_speed_R = 0.0;
+      tr_L = 0; tr_R = 0; mp_L = 0; mp_R = 0; ts_L = 0; ts_R = 0;
+      integral_L = 0; integral_R = 0;
+      Serial0.println("\n[⏱️ START] Pengujian Transien PID Dimulai...");
+    }
+
+    if (testing_transient) {
+      unsigned long elapsed = millis() - start_test_time;
+      float elapsed_sec = elapsed / 1000.0;
+
+      if (speed_L_kmh >= rise_threshold && tr_L == 0) tr_L = elapsed_sec;
+      if (speed_R_kmh >= rise_threshold && tr_R == 0) tr_R = elapsed_sec;
+
+      if (speed_L_kmh > peak_speed_L) peak_speed_L = speed_L_kmh;
+      if (speed_R_kmh > peak_speed_R) peak_speed_R = speed_R_kmh;
+
+      if (peak_speed_L > target_steady) mp_L = ((peak_speed_L - target_steady) / target_steady) * 100.0;
+      if (peak_speed_R > target_steady) mp_R = ((peak_speed_R - target_steady) / target_steady) * 100.0;
+
+      if (speed_L_kmh >= 3.8 && speed_L_kmh <= 4.2) ts_L = elapsed_sec;
+      if (speed_R_kmh >= 3.8 && speed_R_kmh <= 4.2) ts_R = elapsed_sec;
+
+      ess_L = target_steady - speed_L_kmh;
+      ess_R = target_steady - speed_R_kmh;
+
+      if (elapsed_sec >= 10.0 || current_command == CMD_STOP || current_command == CMD_DIAM) {
+        testing_transient = false;
+        Serial0.println(F("\n======================================================="));
+        Serial0.println(F("     REKAPITULASI DATA TRANSIEN UNTUK TABEL BUKU TA    "));
+        Serial0.println(F("======================================================="));
+        Serial0.printf("Konstanta Aktif -> Kp: %.1f | Ki: %.1f | Kd: %.1f\n\n", Kp, Ki, Kd);
+        Serial0.println(F("[RODA KIRI]"));
+        Serial0.printf("  - Rise Time (tr)       : %.2f detik\n", tr_L);
+        Serial0.printf("  - Max Overshoot (Mp)   : %.1f %%\n", mp_L);
+        Serial0.printf("  - Settling Time (ts)   : %.2f detik\n", ts_L);
+        Serial0.printf("  - Steady-State Err(Ess): %.2f Km/h\n\n", abs(ess_L));
+        Serial0.println(F("[RODA KANAN]"));
+        Serial0.printf("  - Rise Time (tr)       : %.2f detik\n", tr_R);
+        Serial0.printf("  - Max Overshoot (Mp)   : %.1f %%\n", mp_R);
+        Serial0.printf("  - Settling Time (ts)   : %.2f detik\n", ts_R);
+        Serial0.printf("  - Steady-State Err(Ess): %.2f Km/h\n", abs(ess_R));
+        Serial0.println(F("=======================================================\n"));
+      }
+    }
+
+    float max_change = 0.15;
+    ramped_speed_L += constrain(setpoint_L - ramped_speed_L, -max_change, max_change);
+    ramped_speed_R += constrain(setpoint_R - ramped_speed_R, -max_change, max_change);
+
+    float err_L = abs(ramped_speed_L) - speed_L_kmh;
+    float err_R = abs(ramped_speed_R) - speed_R_kmh;
+
+    integral_L = constrain(integral_L + (err_L * dt), -50.0, 50.0);
+    integral_R = constrain(integral_R + (err_R * dt), -50.0, 50.0);
+
+    float derivative_L = (err_L - last_err_L) / dt;
+    float derivative_R = (err_R - last_err_R) / dt;
+
+    int pwm_base_L = (Kp * err_L) + (Ki * integral_L) + (Kd * derivative_L);
+    int pwm_base_R = (Kp * err_R) + (Ki * integral_R) + (Kd * derivative_R);
+
+    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + 60, 0, 120);
+    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + 50, 0, 120);
+
+    // Pembalikan tanda minus disesuaikan dengan posisi penukaran kabel fisikmu kemarin
+    int out_L = (ramped_speed_L >= 0) ? -pwm_output_L_final : pwm_output_L_final;
+    int out_R = (ramped_speed_R >= 0) ? pwm_output_R_final : -pwm_output_R_final;
+
+    setMotorSpeed(out_L, RPWM_L, LPWM_L);
+    setMotorSpeed(out_R, RPWM_R, LPWM_R);
+
+    L_Rotation = (out_L < -5) ? CW : ((out_L > 5) ? CCW : STOPPED);
+    R_Rotation = (out_R > 5) ? CW : ((out_R < -5) ? CCW : STOPPED);
+
+    last_err_L = err_L; last_err_R = err_R;
+    vTaskDelay(pdMS_TO_TICKS(40));
   }
 }
 
-// 3. TASK ESP-NOW STATUS LOG (Core 0)
-void TaskESPNow(void *pvParameters) {
-  (void) pvParameters;
+// 3. Render Visual Data ke Layar OLED 0.96" (Core 0)
+void TaskOLED(void *pvParameters) {
+  if (xSemaphoreTake(i2cMutex, portMAX_DELAY)) {
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+      xSemaphoreGive(i2cMutex);
+      vTaskDelete(NULL);
+    }
+    xSemaphoreGive(i2cMutex);
+  }
 
   for (;;) {
-    // Menampilkan log monitoring ke serial komputer setiap 500ms
-    Serial0.printf("[MONITOR] Target Speed -> L: %d | R: %d | Last Msg ID: %ld\n", 
-                  target_speed_left, target_speed_right, last_received_msg_id);
-    vTaskDelay(pdMS_TO_TICKS(500)); 
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50))) {
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+
+      display.setCursor(0, 0);
+      display.print("CMD: ");
+      if (safety_stop_active) display.println("EMERGENCY STOP");
+      else if (current_command == CMD_MAJU) display.println("MAJU (4 km/h)");
+      else if (current_command == CMD_MUNDUR) display.println("MUNDUR");
+      else if (current_command == CMD_KIRI) display.println("BELOK KIRI");
+      else if (current_command == CMD_KANAN) display.println("BELOK KANAN");
+      else display.println("DIAM / STOP");
+
+      // Menyesuaikan label tampilan oled sesuai posisi fisik klarifikasi baru
+      display.setCursor(0, 16);
+      display.printf("R: %ldcm | L: %ldcm | B: %ldcm\n", dist_right, dist_left, dist_back);
+
+      display.setCursor(0, 34);
+      display.printf("V_L: %.1f km/h (%s)\n", speed_L_kmh, (L_Rotation == CW) ? "CW" : (L_Rotation == CCW) ? "CCW" : "STP");
+      display.printf("V_R: %.1f km/h (%s)\n", speed_R_kmh, (R_Rotation == CW) ? "CW" : (R_Rotation == CCW) ? "CCW" : "STP");
+
+      display.setCursor(0, 54);
+      display.print(safety_stop_active ? "[REM AKTIF]" : "[ JALUR AMAN ]");
+
+      display.display();
+      xSemaphoreGive(i2cMutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(250));
   }
 }
 
-// ===================== ARDUINO SETUP & LOOP =====================
 void setup() {
   Serial0.begin(115200);
-  Serial0.println("Memulai Setup Receiver Kursi Roda...");
+  i2cMutex = xSemaphoreCreateMutex();
+  Wire.begin(I2C_SDA, I2C_SCL, 100000);
+  vTaskDelay(pdMS_TO_TICKS(100));
 
-  // Inisialisasi Hardware Pin
-  pinMode(RPWM_R, OUTPUT); pinMode(LPWM_R, OUTPUT); // [cite: 4, 5]
-  pinMode(RPWM_L, OUTPUT); pinMode(LPWM_L, OUTPUT); // [cite: 4, 5]
-  pinMode(IR1, INPUT); pinMode(IR2, INPUT); // [cite: 15]
-  pinMode(TRIG1, OUTPUT); pinMode(ECHO1, INPUT); // [cite: 14]
-  pinMode(TRIG2, OUTPUT); pinMode(ECHO2, INPUT); // [cite: 14]
-  pinMode(TRIG3, OUTPUT); pinMode(ECHO3, INPUT); // [cite: 14, 15]
+  pinMode(RPWM_R, OUTPUT); pinMode(LPWM_R, OUTPUT);
+  pinMode(RPWM_L, OUTPUT); pinMode(LPWM_L, OUTPUT);
 
-  // Keamanan Utama: Matikan semua motor saat menyala
+  pinMode(IR_L, INPUT); attachInterrupt(digitalPinToInterrupt(IR_L), countPulseL, FALLING);
+  pinMode(IR_R, INPUT); attachInterrupt(digitalPinToInterrupt(IR_R), countPulseR, FALLING);
+
+  pinMode(TRIG_RANYA, OUTPUT); pinMode(ECHO_RANYA, INPUT);
+  pinMode(TRIG_KIRI, OUTPUT);  pinMode(ECHO_KIRI, INPUT);
+  pinMode(TRIG_BKNG, OUTPUT);  pinMode(ECHO_BKNG, INPUT);
+
   setMotorSpeed(0, RPWM_R, LPWM_R);
   setMotorSpeed(0, RPWM_L, LPWM_L);
 
-  // Inisialisasi Wi-Fi Mode Station (Wajib untuk ESP-NOW)
   WiFi.mode(WIFI_STA);
-  Serial0.print("[INFO] MAC Address Receiver Ini: ");
-  Serial0.println(WiFi.macAddress());
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE); 
+  esp_wifi_set_promiscuous(false);
 
-  // Inisialisasi Protokol ESP-NOW
-  if (esp_now_init() != ESP_OK) {
-    Serial0.println("[ERR] Gagal menginisialisasi ESP-NOW");
-    return;
+  if (esp_now_init() == ESP_OK) {
+    esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
   }
 
-  // Daftarkan Fungsi Callback Penerima Data
-  esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
-
-  // Pembuatan Jalur Distribusi Task FreeRTOS
-  xTaskCreatePinnedToCore(TaskSensorsOLED, "SensorsOLEDTask", 4096, NULL, 2, &TaskSensorsOLEDHandle, 0);
-  xTaskCreatePinnedToCore(TaskMotorPID, "MotorPIDTask", 4096, NULL, 3, &TaskMotorPIDHandle, 1);
-  xTaskCreatePinnedToCore(TaskESPNow, "ESPNowTask", 4096, NULL, 2, &TaskESPNowHandle, 0);
-
-  Serial0.println("Seluruh Arsitektur Receiver Sukses Dikonfigurasi.");
+  xTaskCreatePinnedToCore(TaskSensors, "SensorsTask", 3072, NULL, 3, NULL, 0);
+  xTaskCreatePinnedToCore(TaskOLED, "OLEDTask", 3072, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(TaskMotorPID, "MotorPIDTask", 4096, NULL, 4, NULL, 1);
 }
 
 void loop() {
-  vTaskDelete(NULL); 
+  vTaskDelete(NULL);
 }
