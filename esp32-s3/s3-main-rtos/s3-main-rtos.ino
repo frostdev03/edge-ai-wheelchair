@@ -20,12 +20,12 @@ const int LPWM_L = 11;
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
-#define TRIG_RANYA 5  // Ultrasonik Kanan
-#define ECHO_RANYA 4
-#define TRIG_KIRI  6  // Ultrasonik Kiri
+#define TRIG_RANYA 4  // Ultrasonik belakang
+#define ECHO_RANYA 5
+#define TRIG_KIRI  6  // Ultrasonik kanan
 #define ECHO_KIRI  7
-#define TRIG_BKNG  8  // Ultrasonik Belakang
-#define ECHO_BKNG  9
+#define TRIG_BKNG  9  // Ultrasonik kiri
+#define ECHO_BKNG  8
 
 SemaphoreHandle_t i2cMutex;
 
@@ -171,12 +171,12 @@ void TaskMotorPID(void *pvParameters) {
   (void) pvParameters;
   unsigned long last_time = millis();
 
-  static float Kp = 5.0, Ki = 0.2, Kd = 0.5;
+  static float Kp = 20, Ki = 0, Kd = 0;
   static float integral_L = 0.0, integral_R = 0.0;
   static float last_err_L = 0.0, last_err_R = 0.0;
 
-  float KOMPENSASI_PWM_KANAN = 0.75; 
-  float KOMPENSASI_PWM_KIRI  = 1.00; 
+  float KOMPENSASI_PWM_KANAN = 1.00; 
+  float KOMPENSASI_PWM_KIRI  = 0.75; 
 
   for (;;) {
     unsigned long now = millis();
@@ -259,8 +259,8 @@ void TaskMotorPID(void *pvParameters) {
     int pwm_base_L = (Kp * err_L) + (Ki * integral_L) + (Kd * derivative_L);
     int pwm_base_R = (Kp * err_R) + (Ki * integral_R) + (Kd * derivative_R);
 
-    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + 60, 0, 120);
-    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + 50, 0, 120);
+    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + 80, 0, 180);
+    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + 70, 0, 180);
 
     // Pembalikan tanda minus disesuaikan dengan posisi penukaran kabel fisikmu kemarin
     int out_L = (ramped_speed_L >= 0) ? -pwm_output_L_final : pwm_output_L_final;
