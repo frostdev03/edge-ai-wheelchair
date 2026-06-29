@@ -36,10 +36,10 @@ float peak_speed_L = 0.0;
 float peak_speed_R = 0.0;
 
 // Parameter Hasil untuk Tabel Buku TA
-float tr_L = 0.0, tr_R = 0.0; 
-float mp_L = 0.0, mp_R = 0.0; 
-float ts_L = 0.0, ts_R = 0.0; 
-float ess_L = 0.0, ess_R = 0.0; 
+float tr_L = 0.0, tr_R = 0.0;
+float mp_L = 0.0, mp_R = 0.0;
+float ts_L = 0.0, ts_R = 0.0;
+float ess_L = 0.0, ess_R = 0.0;
 
 // ===== PARAMETER FISIK KURSI RODA AKTUAL =====
 const float WHEEL_DIAMETER = 0.60;     // Diameter roda aktual 60 cm
@@ -130,10 +130,10 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int l
     case CMD_MUNDUR:
       setpoint_L = -TARGET_SPEED_KMH; setpoint_R = -TARGET_SPEED_KMH;
       break;
-    case CMD_KIRI:  
+    case CMD_KIRI:
       setpoint_L = -(TARGET_SPEED_KMH * 0.6); setpoint_R = (TARGET_SPEED_KMH * 0.6);
       break;
-    case CMD_KANAN: 
+    case CMD_KANAN:
       setpoint_L = (TARGET_SPEED_KMH * 0.6); setpoint_R = -(TARGET_SPEED_KMH * 0.6);
       break;
     case CMD_STOP:
@@ -171,12 +171,12 @@ void TaskMotorPID(void *pvParameters) {
   (void) pvParameters;
   unsigned long last_time = millis();
 
-  static float Kp = 20, Ki = 0, Kd = 0;
+  static float Kp = 15, Ki = 0.25, Kd = 0;
   static float integral_L = 0.0, integral_R = 0.0;
   static float last_err_L = 0.0, last_err_R = 0.0;
 
-  float KOMPENSASI_PWM_KANAN = 1.00; 
-  float KOMPENSASI_PWM_KIRI  = 0.75; 
+  float KOMPENSASI_PWM_KANAN = 1.50;
+  float KOMPENSASI_PWM_KIRI  = 1.00;
 
   for (;;) {
     unsigned long now = millis();
@@ -193,7 +193,7 @@ void TaskMotorPID(void *pvParameters) {
     last_time = now;
 
     float target_steady = 4.0;
-    float rise_threshold = target_steady * 0.9; 
+    float rise_threshold = target_steady * 0.9;
 
     if (current_command == CMD_MAJU && !testing_transient && speed_L_kmh < 0.2 && speed_R_kmh < 0.2) {
       testing_transient = true;
@@ -259,8 +259,15 @@ void TaskMotorPID(void *pvParameters) {
     int pwm_base_L = (Kp * err_L) + (Ki * integral_L) + (Kd * derivative_L);
     int pwm_base_R = (Kp * err_R) + (Ki * integral_R) + (Kd * derivative_R);
 
-    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + 80, 0, 180);
-    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + 70, 0, 180);
+    //    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + 50, 0, 120);
+    //    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + 50, 0, 120);
+
+    // Kickstart hanya saat motor baru mulai dari diam
+    int kickstart_L = (speed_L_kmh < 0.3 && abs(ramped_speed_L) > 0.1) ? 30 : 0;
+    int kickstart_R = (speed_R_kmh < 0.3 && abs(ramped_speed_R) > 0.1) ? 30 : 0;
+
+    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + kickstart_L, 0, 120);
+    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + kickstart_R, 0, 120);
 
     // Pembalikan tanda minus disesuaikan dengan posisi penukaran kabel fisikmu kemarin
     int out_L = (ramped_speed_L >= 0) ? -pwm_output_L_final : pwm_output_L_final;
@@ -341,7 +348,7 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   esp_wifi_set_promiscuous(true);
-  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE); 
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
   esp_wifi_set_promiscuous(false);
 
   if (esp_now_init() == ESP_OK) {

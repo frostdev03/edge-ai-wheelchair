@@ -16,7 +16,7 @@
 
 // ===================== ESP-NOW CONFIGURATION =====================
 // Ganti dengan MAC Address ESP32-S3 Main (Penerima) milikmu
-uint8_t receiverMacAddress[] = {0x30, 0xED, 0xA0, 0xED, 0x6A, 0x44}; 
+uint8_t receiverMacAddress[] = {0x30, 0xED, 0xA0, 0xBD, 0x6A, 0x44}; 
 
 // Definisi ID Perintah menggunakan Enum agar kode mudah dibaca
 enum CommandID {

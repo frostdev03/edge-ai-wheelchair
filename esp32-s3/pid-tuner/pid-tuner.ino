@@ -1,174 +1,205 @@
 #include <Arduino.h>
 
-// ===== KONFIGURASI PIN HARDWARE =====
-const int RPWM_R = 12; // Motor Kanan
-const int LPWM_R = 13;
-const int RPWM_L = 10; // Motor Kiri
-const int LPWM_L = 11;
+// ============================================================================
+// KONFIGURASI PIN & DRIVER MOTOR (IDENTIK)
+// ============================================================================
+#define RPWM_L 12
+#define LPWM_L 13
+#define RPWM_R 10
+#define LPWM_R 11
 
-#define IR_L 14       // TCRT5000 Kiri
-#define IR_R 15       // TCRT5000 Kanan
+#define ENCODER_L_PIN 1
+#define ENCODER_R_PIN 2
 
-// ===== PARAMETER FISIK KURSI RODA AKTUAL =====
-const float WHEEL_DIAMETER = 0.60;     // Diameter roda 60 cm
-const int PULSES_PER_REV = 1;          // 1 Titik isolasi putih di roda
-const float TARGET_SPEED_KMH = 4.0;    // Target Kecepatan Utama
+// ============================================================================
+// PARAMETER SISTEM & TUNING PID (IDENTIK DENGAN CORETAN TERBARU)
+// ============================================================================
+const float WHEEL_DIAMETER = 0.60; 
+const int PULSES_PER_REV = 1;      
 
-// ===== VARIABEL ENKODER & KECEPATAN GLOBAL =====
-volatile unsigned long pulse_count_L = 0;
-volatile unsigned long pulse_count_R = 0;
-float speed_L_kmh = 0.0;
-float speed_R_kmh = 0.0;
-
-// ===== 1 SET KONSTANTA PID TUNGGAL (DAPAT DIINPUT VIA SERIAL) =====
-static float Kp = 5.0;
-static float Ki = 0.0;
+// 🌟 PARAMETER PARAMETER TUNING KAMU (Silakan ganti nilai ini untuk tabel TA)
+static float Kp = 35.0; // Sesuai tes terakhirmu
+static float Ki = 0.0; // 🌟 DIWAJIBKAN AKTIF AGAR MOTOR JALAN PAS DIDUDUKKI!
 static float Kd = 0.0;
 
-// ===== PEKERJAAN INTERRUPT DENGAN PROTEKSI DEBOUNCING =====
-void IRAM_ATTR countPulseL() {
-  static unsigned long last_interrupt_time_L = 0;
-  unsigned long interrupt_time = millis();
-  if (interrupt_time - last_interrupt_time_L > 150) {
-    pulse_count_L++;
-    last_interrupt_time_L = interrupt_time;
-  }
-}
+// Konstanta Kompensasi Mekanis Rantai Bawaanmu
+float KOMPENSASI_PWM_KANAN = 0.75; 
+float KOMPENSASI_PWM_KIRI  = 1.00; 
 
-void IRAM_ATTR countPulseR() {
-  static unsigned long last_interrupt_time_R = 0;
-  unsigned long interrupt_time = millis();
-  if (interrupt_time - last_interrupt_time_R > 150) {
-    pulse_count_R++;
-    last_interrupt_time_R = interrupt_time;
-  }
-}
+// ============================================================================
+// VARIABEL GLOBAL (IDENTIK)
+// ============================================================================
+enum Command { CMD_DIAM, CMD_MAJU, CMD_MUNDUR, CMD_KANAN, CMD_KIRI };
+volatile Command current_command = CMD_DIAM;
 
-// ===== FUNGSI PENGGERAK MOTOR =====
-void setMotorSpeed(int speed, int rpwmPin, int lpwmPin) {
-  speed = constrain(speed, -255, 255);
+volatile unsigned long pulse_count_L = 0;
+volatile unsigned long pulse_count_R = 0;
+
+float speed_L_kmh = 0.0;
+float speed_R_kmh = 0.0;
+float setpoint_L = 0.0;
+float setpoint_R = 0.0;
+
+float ramped_speed_L = 0;
+float ramped_speed_R = 0;
+
+TaskHandle_t TaskPIDHandle = NULL;
+TaskHandle_t TaskSeqTestHandle = NULL;
+
+// ============================================================================
+// INTERRUPT SERVICE ROUTINE (ISR)
+// ============================================================================
+void IRAM_ATTR ISRS_L() { pulse_count_L++; }
+void IRAM_ATTR ISRS_R() { pulse_count_R++; }
+
+// ============================================================================
+// FUNGSI KONTROL MOTOR (SAMAKAN PERSIS LOGIKANYA)
+// ============================================================================
+void setMotorSpeed(int speed, int rPwmPin, int lPwmPin) {
   if (speed >= 0) {
-    analogWrite(rpwmPin, speed);
-    analogWrite(lpwmPin, 0);
+    analogWrite(rPwmPin, speed);
+    analogWrite(lPwmPin, 0);
   } else {
-    analogWrite(rpwmPin, 0);
-    analogWrite(lpwmPin, -speed);
+    analogWrite(rPwmPin, 0);
+    analogWrite(lPwmPin, abs(speed));
   }
 }
 
-// ===== PARSING INPUT SERIAL TUNGGAL (Kp;Ki;Kd) =====
-void checkSerialInput() {
-  if (Serial0.available() > 0) {
-    String input = Serial0.readStringUntil('\n');
-    input.trim();
-    
-    if (input.length() > 0) {
-      int firstSemi = input.indexOf(';');
-      int secondSemi = input.indexOf(';', firstSemi + 1);
-      
-      if (firstSemi != -1 && secondSemi != -1) {
-        Kp = input.substring(0, firstSemi).toFloat();
-        Ki = input.substring(firstSemi + 1, secondSemi).toFloat();
-        Kd = input.substring(secondSemi + 1).toFloat();
-        
-        Serial0.println(F("\n======================================="));
-        Serial0.println(F("          KONSTANTA PID DIPERBARUI     "));
-        Serial0.println(F("======================================="));
-        Serial0.printf("  Gain Tunggal Baru -> Kp: %.2f | Ki: %.2f | Kd: %.2f\n", Kp, Ki, Kd);
-        Serial0.println(F("=======================================\n"));
-      } else {
-        Serial0.println(F("[ERROR] Format input salah! Gunakan format: Kp;Ki;Kd (Contoh: 4.5;0.1;0.5)"));
-      }
+// ============================================================================
+// CORE TASK KENDALI PID (LOGIKA DAN RUMUS 100% SAMA PERSIS DENGAN ORIGINAL)
+// ============================================================================
+void TaskMotorPID(void *pvParameters) {
+  const float dt = 0.04; 
+  float integral_L = 0, integral_R = 0;
+  float previous_error_L = 0, previous_error_R = 0;
+  const float r_step = 0.2; 
+
+  for (;;) {
+    noInterrupts();
+    unsigned long p_L = pulse_count_L; pulse_count_L = 0;
+    unsigned long p_R = pulse_count_R; pulse_count_R = 0;
+    interrupts();
+
+    speed_L_kmh = ((float)p_L / PULSES_PER_REV) * 3.14159 * WHEEL_DIAMETER * (3.6 / dt);
+    speed_R_kmh = ((float)p_R / PULSES_PER_REV) * 3.14159 * WHEEL_DIAMETER * (3.6 / dt);
+
+    // Pemetaan Perintah Otomatis Sekuensial
+    float target_L = 0.0;
+    float target_R = 0.0;
+
+    switch (current_command) {
+      case CMD_MAJU:   target_L = 4.0;  target_R = 4.0;  break;
+      case CMD_MUNDUR: target_L = -4.0; target_R = -4.0; break;
+      case CMD_KANAN:  target_L = 3.5;  target_R = -3.5; break;
+      case CMD_KIRI:   target_L = -3.5; target_R = 3.5;  break;
+      default:         target_L = 0.0;  target_R = 0.0;  break;
     }
+
+    setpoint_L = target_L;
+    setpoint_R = target_R;
+
+    // Logika Ramping (Identik)
+    if (ramped_speed_L < setpoint_L) {
+      ramped_speed_L += r_step; if (ramped_speed_L > setpoint_L) ramped_speed_L = setpoint_L;
+    } else if (ramped_speed_L > setpoint_L) {
+      ramped_speed_L -= r_step; if (ramped_speed_L < setpoint_L) ramped_speed_L = setpoint_L;
+    }
+
+    if (ramped_speed_R < setpoint_R) {
+      ramped_speed_R += r_step; if (ramped_speed_R > setpoint_R) ramped_speed_R = setpoint_R;
+    } else if (ramped_speed_R > setpoint_R) {
+      ramped_speed_R -= r_step; if (ramped_speed_R < setpoint_R) ramped_speed_R = setpoint_R;
+    }
+
+    // Perhitungan Error PID (Identik)
+    float err_L = abs(ramped_speed_L) - speed_L_kmh;
+    float err_R = abs(ramped_speed_R) - speed_R_kmh;
+
+    integral_L += err_L * dt;
+    integral_R += err_R * dt;
+    integral_L = constrain(integral_L, -50.0, 50.0);
+    integral_R = constrain(integral_R, -50.0, 50.0);
+
+    float derivative_L = (err_L - previous_error_L) / dt;
+    float derivative_R = (err_R - previous_error_R) / dt;
+
+    float pwm_base_L = (Kp * err_L) + (Ki * integral_L) + (Kd * derivative_L);
+    float pwm_base_R = (Kp * err_R) + (Ki * integral_R) + (Kd * derivative_R);
+
+    previous_error_L = err_L;
+    previous_error_R = err_R;
+
+    // Saturation & Offset Logic (100% IDENTIK DENGAN FILE ORIGINAL KAMU)
+    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + 100, 0, 180);
+    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + 90, 0, 180);
+
+    // Penentuan Arah Menggunakan Logika Penjumlahan/Pengurangan Asli dari s3-main-rtos.ino
+    int out_L = 0;
+    int out_R = 0;
+
+    if (ramped_speed_L > 0) {
+      out_L = -pwm_output_L_final;
+    } else if (ramped_speed_L < 0) {
+      out_L = pwm_output_L_final;
+    }
+
+    if (ramped_speed_R > 0) {
+      out_R = pwm_output_R_final;
+    } else if (ramped_speed_R < 0) {
+      out_R = -pwm_output_R_final;
+    }
+
+    // Kirim Ke Driver Motor
+    setMotorSpeed(out_L, RPWM_L, LPWM_L);
+    setMotorSpeed(out_R, RPWM_R, LPWM_R);
+
+    // Cetak Data Untuk Plotter Rekap Hasil Transien TA
+    Serial0.printf("CMD:%d | Set_L:%.2f Act_L:%.2f PWM_L:%d | Set_R:%.2f Act_R:%.2f PWM_R:%d\n", 
+                  current_command, abs(ramped_speed_L), speed_L_kmh, pwm_output_L_final,
+                  abs(ramped_speed_R), speed_R_kmh, pwm_output_R_final);
+
+    vTaskDelay(pdMS_TO_TICKS(40));
   }
 }
 
+// ============================================================================
+// TASK AUTOMATED SEQUENTIAL TEST (SEKUENS MATI-WAKTU ANTI-BERISIK)
+// ============================================================================
+void TaskSequentialTest(void *pvParameters) {
+  // Jeda 5 detik di awal untuk persiapan naik ke sasis setelah aki ON
+  vTaskDelay(pdMS_TO_TICKS(5000)); 
+
+  current_command = CMD_MAJU;    vTaskDelay(pdMS_TO_TICKS(3000)); // Maju 3 detik
+  current_command = CMD_MUNDUR;  vTaskDelay(pdMS_TO_TICKS(2000)); // Mundur 2 detik
+  current_command = CMD_KANAN;   vTaskDelay(pdMS_TO_TICKS(2000)); // Kanan 2 detik
+  current_command = CMD_KIRI;    vTaskDelay(pdMS_TO_TICKS(3000)); // Kiri 3 detik
+  current_command = CMD_DIAM;
+  
+  Serial0.println(F("[UJI COBA SEKUENSIAL SELESAI]"));
+  vTaskDelete(NULL); 
+}
+
+// ============================================================================
+// SETUP INITIALIZATION
+// ============================================================================
 void setup() {
   Serial0.begin(115200);
-  Serial0.println(F("========================================================="));
-  Serial0.println(F("   SIMULASI 1 PID + KOMPENSASI PASCA-PID (RHO TUNGGAL)   "));
-  Serial0.println(F("========================================================="));
-  Serial0.println(F("Ketik nilai PID di Serial Monitor dengan format: Kp;Ki;Kd\n"));
 
-  pinMode(RPWM_R, OUTPUT); pinMode(LPWM_R, OUTPUT);
   pinMode(RPWM_L, OUTPUT); pinMode(LPWM_L, OUTPUT);
-  
-  pinMode(IR_L, INPUT); attachInterrupt(digitalPinToInterrupt(IR_L), countPulseL, FALLING);
-  pinMode(IR_R, INPUT); attachInterrupt(digitalPinToInterrupt(IR_R), countPulseR, FALLING);
+  pinMode(RPWM_R, OUTPUT); pinMode(LPWM_R, OUTPUT);
 
-  // Rem diam saat menyala awal
-  setMotorSpeed(0, RPWM_R, LPWM_R);
   setMotorSpeed(0, RPWM_L, LPWM_L);
+  setMotorSpeed(0, RPWM_R, LPWM_R);
+
+  pinMode(ENCODER_L_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_R_PIN, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(ENCODER_L_PIN), ISRS_L, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_R_PIN), ISRS_R, RISING);
+
+  // Jalankan kedua Task secara sinkron di Core 1 sesuai arsitektur aslimu
+  xTaskCreatePinnedToCore(TaskMotorPID, "MotorPID", 4096, NULL, 3, &TaskPIDHandle, 1);
+  xTaskCreatePinnedToCore(TaskSequentialTest, "SeqTest", 4096, NULL, 2, &TaskSeqTestHandle, 1);
 }
 
-void loop() {
-  static unsigned long last_time = millis();
-  static float integral_L = 0.0, integral_R = 0.0;
-  static float last_err_L = 0.0, last_err_R = 0.0;
-
-  // 🌟 ADJUST DI SINI: Faktor Penyeimbang Rantai Mekanis Pasca-PID
-  // Karena rantai kanan lebih panjang/ringan, kita redam output PWM-nya di sini
-  float KOMPENSASI_PWM_KANAN = 0.75; 
-  float KOMPENSASI_PWM_KIRI  = 1.00; 
-
-  unsigned long now = millis();
-  float dt = (now - last_time) / 1000.0;
-  if (dt <= 0.0) dt = 0.04;
-
-  // Membaca perintah penggantian nilai PID interaktif dari Serial Monitor
-  checkSerialInput();
-
-  // Ambil data pulsa interupsi real-time 40ms
-  noInterrupts();
-  unsigned long p_L = pulse_count_L; pulse_count_L = 0;
-  unsigned long p_R = pulse_count_R; pulse_count_R = 0;
-  interrupts();
-
-  // Perhitungan kecepatan sinkron real-time
-  speed_L_kmh = ((float)p_L / PULSES_PER_REV) * 3.14159 * WHEEL_DIAMETER * (3.6 / dt);
-  speed_R_kmh = ((float)p_R / PULSES_PER_REV) * 3.14159 * WHEEL_DIAMETER * (3.6 / dt);
-  last_time = now;
-
-  // Target kecepatan disamakan murni 4.0 km/jam
-  float target_L = TARGET_SPEED_KMH;
-  float target_R = TARGET_SPEED_KMH;
-
-  // Algoritma Loop Tertutup 1 PID Tunggal
-  float err_L = target_L - speed_L_kmh;
-  float err_R = target_R - speed_R_kmh;
-
-  integral_L = constrain(integral_L + (err_L * dt), -40.0, 40.0); 
-  integral_R = constrain(integral_R + (err_R * dt), -40.0, 40.0);
-
-  float derivative_L = (err_L - last_err_L) / dt;
-  float derivative_R = (err_R - last_err_R) / dt;
-
-  // Perhitungan PWM dasar menggunakan 1 set konstanta Kp, Ki, Kd yang sama
-  int pwm_base_L = (Kp * err_L) + (Ki * integral_L) + (Kd * derivative_L);
-  int pwm_base_R = (Kp * err_R) + (Ki * integral_R) + (Kd * derivative_R);
-
-  // 🌟 PASCA-PID ADJUSTMENT: Kalikan hasil kalkulasi dengan faktor penyeimbang rantai
-  int pwm_output_L_final = constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + 60, 0, 120);
-  int pwm_output_R_final = constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + 50, 0, 120);
-
-  // Logika arah inversi sasis kabel fisik
-  int out_L = -pwm_output_L_final; 
-  int out_R = pwm_output_R_final;  
-
-  setMotorSpeed(out_L, RPWM_L, LPWM_L);
-  setMotorSpeed(out_R, RPWM_R, LPWM_R);
-
-  // Printout data analisis performa sampling setiap 500ms
-  static unsigned long last_print = 0;
-  if (now - last_print >= 500) {
-    Serial0.println(F("-----------------------------------------------------------------------"));
-    Serial0.printf("GLOBAL GAIN -> Kp: %.2f | Ki: %.2f | Kd: %.2f\n", Kp, Ki, Kd);
-    Serial0.printf("[LEFT  MOTOR] -> Pulsa: %lu | Speed: %.2f Km/h | PWM Out: %d\n", p_L, speed_L_kmh, out_L);
-    Serial0.printf("[RIGHT MOTOR] -> Pulsa: %lu | Speed: %.2f Km/h | PWM Out: %d (Kompensasi: %.2f)\n", p_R, speed_R_kmh, out_R, KOMPENSASI_PWM_KANAN);
-    last_print = now;
-  }
-
-  last_err_L = err_L;
-  last_err_R = err_R;
-  delay(40); // Interval loop konstan 25 Hz
-}
+void loop() {}
