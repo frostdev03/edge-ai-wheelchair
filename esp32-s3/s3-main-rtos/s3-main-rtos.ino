@@ -1,4 +1,4 @@
-#include <SPI.h>
+ #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -20,12 +20,12 @@ const int LPWM_L = 11;
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
-#define TRIG_RANYA 4  // Ultrasonik belakang
-#define ECHO_RANYA 5
-#define TRIG_KIRI  6  // Ultrasonik kanan
-#define ECHO_KIRI  7
-#define TRIG_BKNG  9  // Ultrasonik kiri
-#define ECHO_BKNG  8
+#define TRIG_DEPAN_KANAN 4   // Ultrasonik Depan Kanan
+#define ECHO_DEPAN_KANAN 5
+#define TRIG_DEPAN_KIRI  6   // Ultrasonik Depan Kiri
+#define ECHO_DEPAN_KIRI  7
+#define TRIG_BKNG        8   // Ultrasonik Belakang
+#define ECHO_BKNG        9
 
 SemaphoreHandle_t i2cMutex;
 
@@ -44,7 +44,7 @@ float ess_L = 0.0, ess_R = 0.0;
 // ===== PARAMETER FISIK KURSI RODA AKTUAL =====
 const float WHEEL_DIAMETER = 0.60;     // Diameter roda aktual 60 cm
 const int PULSES_PER_REV = 1;          // 1 Titik isolasi putih di roda
-const float TARGET_SPEED_KMH = 4.0;    // Setpoint maksimal 4 km/jam
+const float TARGET_SPEED_KMH = 2.0;    // Setpoint maksimal 4 km/jam
 
 // ===== ENUMERASI PERINTAH =====
 enum CommandID { CMD_DIAM = 0, CMD_MAJU = 1, CMD_MUNDUR = 2, CMD_KIRI = 3, CMD_KANAN = 4, CMD_STOP = 5 };
@@ -59,8 +59,9 @@ struct_message incomingData;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // ===== VARIABEL GLOBAL (SHARED RESOURCES) =====
-volatile long dist_right = 0, dist_left = 0, dist_back = 0;
-volatile bool safety_stop_active = false;
+volatile long dist_depan_kanan = 0, dist_depan_kiri = 0, dist_back = 0;
+volatile bool safety_front_active = false;  // Objek di depan → blokir maju
+volatile bool safety_back_active  = false;  // Objek di belakang → blokir mundur
 volatile int current_command = CMD_DIAM;
 
 volatile unsigned long pulse_count_L = 0;
@@ -121,14 +122,22 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int l
   memcpy(&incomingData, data, sizeof(incomingData));
   current_command = incomingData.command;
 
-  if (safety_stop_active) return;
-
   switch (current_command) {
     case CMD_MAJU:
-      setpoint_L = TARGET_SPEED_KMH; setpoint_R = TARGET_SPEED_KMH;
+      // Maju hanya diblokir jika ada objek di depan
+      if (!safety_front_active) {
+        setpoint_L = TARGET_SPEED_KMH; setpoint_R = TARGET_SPEED_KMH;
+      } else {
+        setpoint_L = 0; setpoint_R = 0;
+      }
       break;
     case CMD_MUNDUR:
-      setpoint_L = -TARGET_SPEED_KMH; setpoint_R = -TARGET_SPEED_KMH;
+      // Mundur hanya diblokir jika ada objek di belakang
+      if (!safety_back_active) {
+        setpoint_L = -TARGET_SPEED_KMH; setpoint_R = -TARGET_SPEED_KMH;
+      } else {
+        setpoint_L = 0; setpoint_R = 0;
+      }
       break;
     case CMD_KIRI:
       setpoint_L = -(TARGET_SPEED_KMH * 0.6); setpoint_R = (TARGET_SPEED_KMH * 0.6);
@@ -149,19 +158,28 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int l
 // 1. Sensor & Safety Emergency Stop (Core 0)
 void TaskSensors(void *pvParameters) {
   for (;;) {
-    dist_right = readUltrasonicCM(TRIG_RANYA, ECHO_RANYA); vTaskDelay(pdMS_TO_TICKS(20));
-    dist_left  = readUltrasonicCM(TRIG_KIRI, ECHO_KIRI);   vTaskDelay(pdMS_TO_TICKS(20));
-    dist_back  = readUltrasonicCM(TRIG_BKNG, ECHO_BKNG);   vTaskDelay(pdMS_TO_TICKS(20));
+    dist_depan_kanan = readUltrasonicCM(TRIG_DEPAN_KANAN, ECHO_DEPAN_KANAN); vTaskDelay(pdMS_TO_TICKS(20));
+    dist_depan_kiri  = readUltrasonicCM(TRIG_DEPAN_KIRI,  ECHO_DEPAN_KIRI);  vTaskDelay(pdMS_TO_TICKS(20));
+    dist_back        = readUltrasonicCM(TRIG_BKNG,        ECHO_BKNG);        vTaskDelay(pdMS_TO_TICKS(20));
 
-    // Cek emergency stop jika ada sensor memotret jarak <= 30cm
-    if ((dist_right > 0 && dist_right <= 30) || (dist_left > 0 && dist_left <= 30) || (dist_back > 0 && dist_back <= 30)) {
-      if (!safety_stop_active) {
-        safety_stop_active = true;
-        setpoint_L = 0; setpoint_R = 0;
-      }
-    } else {
-      safety_stop_active = false;
+    // Depan: blokir maju jika ada objek <= 30cm di salah satu sensor depan
+    bool front_blocked = (dist_depan_kanan > 0 && dist_depan_kanan <= 30) ||
+                         (dist_depan_kiri  > 0 && dist_depan_kiri  <= 30);
+
+    // Belakang: blokir mundur jika ada objek <= 30cm di belakang
+    bool back_blocked = (dist_back > 0 && dist_back <= 30);
+
+    safety_front_active = front_blocked;
+    safety_back_active  = back_blocked;
+
+    // Paksa stop setpoint sesuai kondisi aktif
+    if (front_blocked && (current_command == CMD_MAJU)) {
+      setpoint_L = 0; setpoint_R = 0;
     }
+    if (back_blocked && (current_command == CMD_MUNDUR)) {
+      setpoint_L = 0; setpoint_R = 0;
+    }
+
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
@@ -171,7 +189,7 @@ void TaskMotorPID(void *pvParameters) {
   (void) pvParameters;
   unsigned long last_time = millis();
 
-  static float Kp = 15, Ki = 0.25, Kd = 0;
+  static float Kp = 35, Ki = 0.5, Kd = 0.5;
   static float integral_L = 0.0, integral_R = 0.0;
   static float last_err_L = 0.0, last_err_R = 0.0;
 
@@ -266,8 +284,8 @@ void TaskMotorPID(void *pvParameters) {
     int kickstart_L = (speed_L_kmh < 0.3 && abs(ramped_speed_L) > 0.1) ? 30 : 0;
     int kickstart_R = (speed_R_kmh < 0.3 && abs(ramped_speed_R) > 0.1) ? 30 : 0;
 
-    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + kickstart_L, 0, 120);
-    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + kickstart_R, 0, 120);
+    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + kickstart_L, 0, 150);
+    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + kickstart_R, 0, 150);
 
     // Pembalikan tanda minus disesuaikan dengan posisi penukaran kabel fisikmu kemarin
     int out_L = (ramped_speed_L >= 0) ? -pwm_output_L_final : pwm_output_L_final;
@@ -302,23 +320,25 @@ void TaskOLED(void *pvParameters) {
 
       display.setCursor(0, 0);
       display.print("CMD: ");
-      if (safety_stop_active) display.println("EMERGENCY STOP");
+      if (safety_front_active && (current_command == CMD_MAJU)) display.println("BLOKIR DEPAN");
+      else if (safety_back_active && (current_command == CMD_MUNDUR)) display.println("BLOKIR BLKG");
       else if (current_command == CMD_MAJU) display.println("MAJU (4 km/h)");
       else if (current_command == CMD_MUNDUR) display.println("MUNDUR");
       else if (current_command == CMD_KIRI) display.println("BELOK KIRI");
       else if (current_command == CMD_KANAN) display.println("BELOK KANAN");
       else display.println("DIAM / STOP");
 
-      // Menyesuaikan label tampilan oled sesuai posisi fisik klarifikasi baru
       display.setCursor(0, 16);
-      display.printf("R: %ldcm | L: %ldcm | B: %ldcm\n", dist_right, dist_left, dist_back);
+      display.printf("DR:%ldcm DL:%ldcm B:%ldcm\n", dist_depan_kanan, dist_depan_kiri, dist_back);
 
       display.setCursor(0, 34);
       display.printf("V_L: %.1f km/h (%s)\n", speed_L_kmh, (L_Rotation == CW) ? "CW" : (L_Rotation == CCW) ? "CCW" : "STP");
       display.printf("V_R: %.1f km/h (%s)\n", speed_R_kmh, (R_Rotation == CW) ? "CW" : (R_Rotation == CCW) ? "CCW" : "STP");
 
       display.setCursor(0, 54);
-      display.print(safety_stop_active ? "[REM AKTIF]" : "[ JALUR AMAN ]");
+      if (safety_front_active) display.print("[BLOKIR DEPAN]");
+      else if (safety_back_active) display.print("[BLOKIR BLKG ]");
+      else display.print("[ JALUR AMAN  ]");
 
       display.display();
       xSemaphoreGive(i2cMutex);
@@ -339,9 +359,9 @@ void setup() {
   pinMode(IR_L, INPUT); attachInterrupt(digitalPinToInterrupt(IR_L), countPulseL, FALLING);
   pinMode(IR_R, INPUT); attachInterrupt(digitalPinToInterrupt(IR_R), countPulseR, FALLING);
 
-  pinMode(TRIG_RANYA, OUTPUT); pinMode(ECHO_RANYA, INPUT);
-  pinMode(TRIG_KIRI, OUTPUT);  pinMode(ECHO_KIRI, INPUT);
-  pinMode(TRIG_BKNG, OUTPUT);  pinMode(ECHO_BKNG, INPUT);
+  pinMode(TRIG_DEPAN_KANAN, OUTPUT); pinMode(ECHO_DEPAN_KANAN, INPUT);
+  pinMode(TRIG_DEPAN_KIRI,  OUTPUT); pinMode(ECHO_DEPAN_KIRI,  INPUT);
+  pinMode(TRIG_BKNG,        OUTPUT); pinMode(ECHO_BKNG,        INPUT);
 
   setMotorSpeed(0, RPWM_R, LPWM_R);
   setMotorSpeed(0, RPWM_L, LPWM_L);
