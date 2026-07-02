@@ -1,4 +1,4 @@
- #include <SPI.h>
+#include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -44,7 +44,7 @@ float ess_L = 0.0, ess_R = 0.0;
 // ===== PARAMETER FISIK KURSI RODA AKTUAL =====
 const float WHEEL_DIAMETER = 0.60;     // Diameter roda aktual 60 cm
 const int PULSES_PER_REV = 1;          // 1 Titik isolasi putih di roda
-const float TARGET_SPEED_KMH = 2.0;    // Setpoint maksimal 4 km/jam
+const float TARGET_SPEED_KMH = 4;    // Dengan asumsi dibantu dorong di fase start; motor cukup utk steady-state
 
 // ===== ENUMERASI PERINTAH =====
 enum CommandID { CMD_DIAM = 0, CMD_MAJU = 1, CMD_MUNDUR = 2, CMD_KIRI = 3, CMD_KANAN = 4, CMD_STOP = 5 };
@@ -75,6 +75,8 @@ float setpoint_L = 0.0;
 float setpoint_R = 0.0;
 float ramped_speed_L = 0.0;
 float ramped_speed_R = 0.0;
+volatile int pwm_output_L_final = 0;
+volatile int pwm_output_R_final = 0;
 
 // ===== PEKERJAAN INTERRUPT DENGAN PROTEKSI DEBOUNCING =====
 void IRAM_ATTR countPulseL() {
@@ -189,9 +191,13 @@ void TaskMotorPID(void *pvParameters) {
   (void) pvParameters;
   unsigned long last_time = millis();
 
-  static float Kp = 35, Ki = 0.5, Kd = 0.5;
+  static float Kp = 15, Ki = 0.25, Kd = 0.5;
   static float integral_L = 0.0, integral_R = 0.0;
   static float last_err_L = 0.0, last_err_R = 0.0;
+
+  // Proteksi stall: lacak berapa lama motor diam padahal sudah diberi kickstart
+  static unsigned long stall_start_L = 0, stall_start_R = 0;
+  static bool stall_timer_L_active = false, stall_timer_R_active = false;
 
   float KOMPENSASI_PWM_KANAN = 1.50;
   float KOMPENSASI_PWM_KIRI  = 1.00;
@@ -280,12 +286,31 @@ void TaskMotorPID(void *pvParameters) {
     //    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + 50, 0, 120);
     //    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + 50, 0, 120);
 
-    // Kickstart hanya saat motor baru mulai dari diam
-    int kickstart_L = (speed_L_kmh < 0.3 && abs(ramped_speed_L) > 0.1) ? 30 : 0;
-    int kickstart_R = (speed_R_kmh < 0.3 && abs(ramped_speed_R) > 0.1) ? 30 : 0;
+    // Kickstart hanya saat motor baru mulai dari diam — dinaikkan signifikan
+    // karena target speed rendah membuat error awal kecil sehingga Kp*error tidak cukup
+    bool wants_kickstart_L = (speed_L_kmh < 0.3 && abs(ramped_speed_L) > 0.1);
+    bool wants_kickstart_R = (speed_R_kmh < 0.3 && abs(ramped_speed_R) > 0.1);
 
-    int pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + kickstart_L, 0, 150);
-    int pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + kickstart_R, 0, 150);
+    // Proteksi stall: jika kickstart aktif >2 detik tapi speed tetap <0.3, motor dianggap stall -> matikan kickstart
+    if (wants_kickstart_L) {
+      if (!stall_timer_L_active) { stall_timer_L_active = true; stall_start_L = now; }
+    } else {
+      stall_timer_L_active = false;
+    }
+    if (wants_kickstart_R) {
+      if (!stall_timer_R_active) { stall_timer_R_active = true; stall_start_R = now; }
+    } else {
+      stall_timer_R_active = false;
+    }
+
+    bool stall_detected_L = stall_timer_L_active && (now - stall_start_L > 2000);
+    bool stall_detected_R = stall_timer_R_active && (now - stall_start_R > 2000);
+
+    int kickstart_L = (wants_kickstart_L && !stall_detected_L) ? 110 : 0;
+    int kickstart_R = (wants_kickstart_R && !stall_detected_R) ? 110 : 0;
+
+    pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + kickstart_L, 0, 170);
+    pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + kickstart_R, 0, 170);
 
     // Pembalikan tanda minus disesuaikan dengan posisi penukaran kabel fisikmu kemarin
     int out_L = (ramped_speed_L >= 0) ? -pwm_output_L_final : pwm_output_L_final;
@@ -332,8 +357,8 @@ void TaskOLED(void *pvParameters) {
       display.printf("DR:%ldcm DL:%ldcm B:%ldcm\n", dist_depan_kanan, dist_depan_kiri, dist_back);
 
       display.setCursor(0, 34);
-      display.printf("V_L: %.1f km/h (%s)\n", speed_L_kmh, (L_Rotation == CW) ? "CW" : (L_Rotation == CCW) ? "CCW" : "STP");
-      display.printf("V_R: %.1f km/h (%s)\n", speed_R_kmh, (R_Rotation == CW) ? "CW" : (R_Rotation == CCW) ? "CCW" : "STP");
+      display.printf("V_L:%.1f PWM:%d\n", speed_L_kmh, pwm_output_L_final);
+      display.printf("V_R:%.1f PWM:%d\n", speed_R_kmh, pwm_output_R_final);
 
       display.setCursor(0, 54);
       if (safety_front_active) display.print("[BLOKIR DEPAN]");
