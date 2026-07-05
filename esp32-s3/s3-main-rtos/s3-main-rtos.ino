@@ -44,7 +44,7 @@ float ess_L = 0.0, ess_R = 0.0;
 // ===== PARAMETER FISIK KURSI RODA AKTUAL =====
 const float WHEEL_DIAMETER = 0.60;     // Diameter roda aktual 60 cm
 const int PULSES_PER_REV = 1;          // 1 Titik isolasi putih di roda
-const float TARGET_SPEED_KMH = 4;    // Dengan asumsi dibantu dorong di fase start; motor cukup utk steady-state
+const float TARGET_SPEED_KMH = 1.5;  // Realistis untuk dalam ruangan, margin aman torsi motor
 
 // ===== ENUMERASI PERINTAH =====
 enum CommandID { CMD_DIAM = 0, CMD_MAJU = 1, CMD_MUNDUR = 2, CMD_KIRI = 3, CMD_KANAN = 4, CMD_STOP = 5 };
@@ -165,11 +165,11 @@ void TaskSensors(void *pvParameters) {
     dist_back        = readUltrasonicCM(TRIG_BKNG,        ECHO_BKNG);        vTaskDelay(pdMS_TO_TICKS(20));
 
     // Depan: blokir maju jika ada objek <= 30cm di salah satu sensor depan
-    bool front_blocked = (dist_depan_kanan > 0 && dist_depan_kanan <= 30) ||
-                         (dist_depan_kiri  > 0 && dist_depan_kiri  <= 30);
+    bool front_blocked = (dist_depan_kanan > 0 && dist_depan_kanan <= 40) ||
+                         (dist_depan_kiri  > 0 && dist_depan_kiri  <= 40);
 
-    // Belakang: blokir mundur jika ada objek <= 30cm di belakang
-    bool back_blocked = (dist_back > 0 && dist_back <= 30);
+    // Belakang: blokir mundur jika ada objek <= 40cm di belakang
+    bool back_blocked = (dist_back > 0 && dist_back <= 40);
 
     safety_front_active = front_blocked;
     safety_back_active  = back_blocked;
@@ -199,8 +199,8 @@ void TaskMotorPID(void *pvParameters) {
   static unsigned long stall_start_L = 0, stall_start_R = 0;
   static bool stall_timer_L_active = false, stall_timer_R_active = false;
 
-  float KOMPENSASI_PWM_KANAN = 1.50;
-  float KOMPENSASI_PWM_KIRI  = 1.00;
+  float KOMPENSASI_PWM_KANAN = 1.00;
+  float KOMPENSASI_PWM_KIRI  = 1.20;
 
   for (;;) {
     unsigned long now = millis();
@@ -216,7 +216,7 @@ void TaskMotorPID(void *pvParameters) {
     speed_R_kmh = ((float)p_R / PULSES_PER_REV) * 3.14159 * WHEEL_DIAMETER * (3.6 / dt);
     last_time = now;
 
-    float target_steady = 4.0;
+    float target_steady = 1.5;
     float rise_threshold = target_steady * 0.9;
 
     if (current_command == CMD_MAJU && !testing_transient && speed_L_kmh < 0.2 && speed_R_kmh < 0.2) {
@@ -241,8 +241,11 @@ void TaskMotorPID(void *pvParameters) {
       if (peak_speed_L > target_steady) mp_L = ((peak_speed_L - target_steady) / target_steady) * 100.0;
       if (peak_speed_R > target_steady) mp_R = ((peak_speed_R - target_steady) / target_steady) * 100.0;
 
-      if (speed_L_kmh >= 3.8 && speed_L_kmh <= 4.2) ts_L = elapsed_sec;
-      if (speed_R_kmh >= 3.8 && speed_R_kmh <= 4.2) ts_R = elapsed_sec;
+      //      if (speed_L_kmh >= 3.8 && speed_L_kmh <= 4.2) ts_L = elapsed_sec;
+      //      if (speed_R_kmh >= 3.8 && speed_R_kmh <= 4.2) ts_R = elapsed_sec;
+
+      if (speed_L_kmh >= 1.35 && speed_L_kmh <= 1.65) ts_L = elapsed_sec;
+      if (speed_R_kmh >= 1.35 && speed_R_kmh <= 1.65) ts_R = elapsed_sec;
 
       ess_L = target_steady - speed_L_kmh;
       ess_R = target_steady - speed_R_kmh;
@@ -267,7 +270,11 @@ void TaskMotorPID(void *pvParameters) {
       }
     }
 
-    float max_change = 0.15;
+    // Saat safety aktif dan setpoint sudah 0, percepat ramping 10x untuk rem cepat
+    bool emergency_brake = (setpoint_L == 0 && setpoint_R == 0) &&
+                           (safety_front_active || safety_back_active);
+    float max_change = emergency_brake ? 1.5 : 0.15;
+
     ramped_speed_L += constrain(setpoint_L - ramped_speed_L, -max_change, max_change);
     ramped_speed_R += constrain(setpoint_R - ramped_speed_R, -max_change, max_change);
 
@@ -293,12 +300,18 @@ void TaskMotorPID(void *pvParameters) {
 
     // Proteksi stall: jika kickstart aktif >2 detik tapi speed tetap <0.3, motor dianggap stall -> matikan kickstart
     if (wants_kickstart_L) {
-      if (!stall_timer_L_active) { stall_timer_L_active = true; stall_start_L = now; }
+      if (!stall_timer_L_active) {
+        stall_timer_L_active = true;
+        stall_start_L = now;
+      }
     } else {
       stall_timer_L_active = false;
     }
     if (wants_kickstart_R) {
-      if (!stall_timer_R_active) { stall_timer_R_active = true; stall_start_R = now; }
+      if (!stall_timer_R_active) {
+        stall_timer_R_active = true;
+        stall_start_R = now;
+      }
     } else {
       stall_timer_R_active = false;
     }
@@ -306,8 +319,8 @@ void TaskMotorPID(void *pvParameters) {
     bool stall_detected_L = stall_timer_L_active && (now - stall_start_L > 2000);
     bool stall_detected_R = stall_timer_R_active && (now - stall_start_R > 2000);
 
-    int kickstart_L = (wants_kickstart_L && !stall_detected_L) ? 110 : 0;
-    int kickstart_R = (wants_kickstart_R && !stall_detected_R) ? 110 : 0;
+    int kickstart_L = (wants_kickstart_L && !stall_detected_L) ? 90 : 0;
+    int kickstart_R = (wants_kickstart_R && !stall_detected_R) ? 90 : 0;
 
     pwm_output_L_final = (ramped_speed_L == 0) ? 0 : constrain((int)(pwm_base_L * KOMPENSASI_PWM_KIRI) + kickstart_L, 0, 170);
     pwm_output_R_final = (ramped_speed_R == 0) ? 0 : constrain((int)(pwm_base_R * KOMPENSASI_PWM_KANAN) + kickstart_R, 0, 170);
