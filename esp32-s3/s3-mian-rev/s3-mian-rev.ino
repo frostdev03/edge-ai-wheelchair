@@ -74,6 +74,37 @@ long readUltrasonicCM(int trigPin, int echoPin) {
   return duration / 58;
 }
 
+// ===== FUNGSI CEK SISA RAM & FLASH =====
+// Dipanggil sekali di akhir setup() (setelah semua task & modul aktif, supaya
+// datanya merepresentasikan kondisi operasional nyata, bukan sketch kosong),
+// dan diulang berkala lewat Serial supaya bisa lihat tren (misal RAM makin
+// abis / fragmentasi) selama sistem berjalan lama.
+void printMemoryInfo() {
+  Serial0.println("\n===== INFORMASI MEMORI MIKROKONTROLER =====");
+
+  // ---- RAM (Heap) ----
+  Serial0.println("--- RAM (Heap) ---");
+  Serial0.printf("Total Heap       : %u bytes (%.2f KB)\n", ESP.getHeapSize(), ESP.getHeapSize() / 1024.0);
+  Serial0.printf("Sisa Heap Bebas  : %u bytes (%.2f KB)\n", ESP.getFreeHeap(), ESP.getFreeHeap() / 1024.0);
+  Serial0.printf("Heap Minimum Pernah Tercatat : %u bytes (%.2f KB)\n", ESP.getMinFreeHeap(), ESP.getMinFreeHeap() / 1024.0);
+  Serial0.printf("Blok Alokasi Terbesar        : %u bytes (%.2f KB)\n", ESP.getMaxAllocHeap(), ESP.getMaxAllocHeap() / 1024.0);
+
+  float persen_ram_sisa = (ESP.getFreeHeap() * 100.0) / ESP.getHeapSize();
+  Serial0.printf("Persentase RAM Sisa          : %.2f %%\n", persen_ram_sisa);
+
+  // ---- Flash ----
+  Serial0.println("--- FLASH ---");
+  Serial0.printf("Ukuran Sketch (Firmware) : %u bytes (%.2f KB)\n", ESP.getSketchSize(), ESP.getSketchSize() / 1024.0);
+  Serial0.printf("Sisa Ruang Sketch Bebas  : %u bytes (%.2f KB)\n", ESP.getFreeSketchSpace(), ESP.getFreeSketchSpace() / 1024.0);
+
+  float persen_flash_terpakai = (ESP.getSketchSize() * 100.0) / (ESP.getSketchSize() + ESP.getFreeSketchSpace());
+  float persen_flash_sisa = 100.0 - persen_flash_terpakai;
+  Serial0.printf("Persentase Flash Terpakai (partisi app) : %.2f %%\n", persen_flash_terpakai);
+  Serial0.printf("Persentase Flash Sisa (partisi app)     : %.2f %%\n", persen_flash_sisa);
+
+  Serial0.println("=============================================\n");
+}
+
 // ===== ESP-NOW RECEIVER CALLBACK =====
 // Hanya bertugas menyimpan command yang masuk. Keputusan "boleh jalan atau
 // tidak" karena safety sepenuhnya ditentukan di TaskMotorRamp & TaskSensors,
@@ -200,7 +231,19 @@ void TaskOLED(void *pvParameters) {
     xSemaphoreGive(i2cMutex);
   }
 
+  const int CETAK_MEMORI_TIAP_N_SIKLUS = 40; // 40 x 250ms = 10 detik
+  int hitung_siklus = 0;
+
   for (;;) {
+    // Cetak status memori berkala ke Serial (tidak mengganggu tampilan OLED),
+    // supaya bisa dipantau trennya selama sistem berjalan lama (misal ada
+    // kebocoran RAM/fragmentasi heap).
+    hitung_siklus++;
+    if (hitung_siklus >= CETAK_MEMORI_TIAP_N_SIKLUS) {
+      hitung_siklus = 0;
+      printMemoryInfo();
+    }
+
     if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50))) {
       display.clearDisplay();
       display.setTextSize(1);
@@ -263,6 +306,10 @@ void setup() {
   xTaskCreatePinnedToCore(TaskSensors,   "SensorsTask",  3072, NULL, 3, NULL, 0);
   xTaskCreatePinnedToCore(TaskOLED,      "OLEDTask",     3072, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(TaskMotorRamp, "MotorRampTask", 4096, NULL, 4, NULL, 1);
+
+  vTaskDelay(pdMS_TO_TICKS(200)); // beri jeda sebentar biar semua task sempat start
+  Serial0.println("\n[SETUP SELESAI] Kondisi memori setelah semua modul aktif:");
+  printMemoryInfo();
 }
 
 void loop() {

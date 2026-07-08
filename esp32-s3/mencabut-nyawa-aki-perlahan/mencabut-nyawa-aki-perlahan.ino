@@ -9,10 +9,10 @@ const int RPWM_L = 10; // Motor Kiri
 const int LPWM_L = 11;
 
 // ===== NILAI PWM (samain/samakan dengan hasil tuning di sketch utama) =====
-const int BASE_PWM_L = 51; // magnitude PWM roda kiri saat maju/mundur
-const int BASE_PWM_R = 80; // magnitude PWM roda kanan saat maju/mundur
-const int TURN_PWM_L = 150; // magnitude PWM roda kiri saat belok kanan
-const int TURN_PWM_R = 0;   // magnitude PWM roda kanan saat belok kanan (diam)
+const int BASE_PWM_L = 31; // magnitude PWM roda kiri saat maju/mundur
+const int BASE_PWM_R = 60; // magnitude PWM roda kanan saat maju/mundur
+const int TURN_PWM_L = 0; // magnitude PWM roda kiri saat belok kanan
+const int TURN_PWM_R = 60;   // magnitude PWM roda kanan saat belok kanan (diam)
 
 const int JUMLAH_LOOP = 5;
 
@@ -57,18 +57,18 @@ void loop() {
   
     Serial0.println("Maju 2 detik...");
     gerakMaju();
-    delay(2500);
+    delay(2000);
 
     Serial0.println("Stop...");
     berhenti();
-    delay(100);
+    delay(500);
 
     Serial0.println("Belok kanan 1 detik...");
     belokKanan();
-    delay(100);
+    delay(2000);
 
     Serial0.println("Stop...");
     berhenti();
-    delay(100);
+    delay(500);
 
 }

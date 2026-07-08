@@ -69,6 +69,60 @@ static bool checkPSRAM() {
     return true; //[cite: 66]
 }
 
+// ===== FUNGSI CEK SISA RAM, PSRAM & FLASH =====
+// PSRAM relevan untuk dilaporkan di board ini karena ringBuffer dan
+// inferenceBuffer memang dialokasikan dari PSRAM (heap_caps_malloc dengan
+// MALLOC_CAP_SPIRAM), bukan dari heap internal biasa.
+void printMemoryInfo() {
+    Serial.println("\n===== INFORMASI MEMORI MIKROKONTROLER (KALUNG) =====");
+
+    // ---- RAM Internal (Heap) ----
+    Serial.println("--- RAM Internal (Heap) ---");
+    Serial.printf("Total Heap       : %u bytes (%.2f KB)\n", ESP.getHeapSize(), ESP.getHeapSize() / 1024.0);
+    Serial.printf("Sisa Heap Bebas  : %u bytes (%.2f KB)\n", ESP.getFreeHeap(), ESP.getFreeHeap() / 1024.0);
+    Serial.printf("Heap Minimum Pernah Tercatat : %u bytes (%.2f KB)\n", ESP.getMinFreeHeap(), ESP.getMinFreeHeap() / 1024.0);
+    Serial.printf("Blok Alokasi Terbesar        : %u bytes (%.2f KB)\n", ESP.getMaxAllocHeap(), ESP.getMaxAllocHeap() / 1024.0);
+
+    float persen_ram_sisa = (ESP.getFreeHeap() * 100.0) / ESP.getHeapSize();
+    Serial.printf("Persentase RAM Internal Sisa : %.2f %%\n", persen_ram_sisa);
+
+    // ---- PSRAM (dipakai untuk ringBuffer & inferenceBuffer) ----
+    Serial.println("--- PSRAM ---");
+    size_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    if (psram_total > 0) {
+        size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        Serial.printf("Total PSRAM      : %u bytes (%.2f KB)\n", (unsigned)psram_total, psram_total / 1024.0);
+        Serial.printf("Sisa PSRAM Bebas : %u bytes (%.2f KB)\n", (unsigned)psram_free, psram_free / 1024.0);
+        float persen_psram_sisa = (psram_free * 100.0) / psram_total;
+        Serial.printf("Persentase PSRAM Sisa : %.2f %%\n", persen_psram_sisa);
+    } else {
+        Serial.println("PSRAM tidak terdeteksi di board ini.");
+    }
+
+    // ---- Flash ----
+    Serial.println("--- FLASH ---");
+    Serial.printf("Ukuran Sketch (Firmware) : %u bytes (%.2f KB)\n", ESP.getSketchSize(), ESP.getSketchSize() / 1024.0);
+    Serial.printf("Sisa Ruang Sketch Bebas  : %u bytes (%.2f KB)\n", ESP.getFreeSketchSpace(), ESP.getFreeSketchSpace() / 1024.0);
+
+    float persen_flash_terpakai = (ESP.getSketchSize() * 100.0) / (ESP.getSketchSize() + ESP.getFreeSketchSpace());
+    float persen_flash_sisa = 100.0 - persen_flash_terpakai;
+    Serial.printf("Persentase Flash Terpakai (partisi app) : %.2f %%\n", persen_flash_terpakai);
+    Serial.printf("Persentase Flash Sisa (partisi app)     : %.2f %%\n", persen_flash_sisa);
+
+    Serial.println("=====================================================\n");
+}
+
+// Task ringan khusus buat mencetak status memori tiap 10 detik ke Serial,
+// dipisah dari TaskInference supaya pencetakannya tetap jalan berkala
+// meskipun VAD sedang tidak ter-trigger (TaskInference bisa idle lama
+// kalau tidak ada suara masuk).
+void TaskMemoryMonitor(void *pvParameters) {
+    for (;;) {
+        printMemoryInfo();
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+
 static int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr) {
     if ((offset + length) > (size_t)WIN_SAMPLES) return -1; //[cite: 67]
     numpy::int16_to_float(inferenceBuffer + offset, out_ptr, length); //[cite: 68]
@@ -257,6 +311,11 @@ void setup() {
     ringMutex = xSemaphoreCreateMutex(); //[cite: 101]
     xTaskCreatePinnedToCore(TaskInference, "Inference", 32768, NULL, 1, NULL, 1); //[cite: 102]
     xTaskCreatePinnedToCore(TaskAudioCapture, "AudioCapture", 8192, NULL, 3, NULL, 0); //[cite: 102]
+    xTaskCreatePinnedToCore(TaskMemoryMonitor, "MemMonitor", 3072, NULL, 1, NULL, 0);
+
+    vTaskDelay(pdMS_TO_TICKS(200)); // beri jeda sebentar biar semua task sempat start
+    Serial.println("\n[SETUP SELESAI] Kondisi memori setelah semua modul aktif:");
+    printMemoryInfo();
 }
 
 void loop() {
