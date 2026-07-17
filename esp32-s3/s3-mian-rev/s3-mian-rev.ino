@@ -12,7 +12,7 @@ const int LPWM_R = 13;
 const int RPWM_L = 10; // Motor Kiri
 const int LPWM_L = 11;
 
-#define I2C_SDA 1     // Jalur OLED 0.96"
+#define I2C_SDA 1     
 #define I2C_SCL 2
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -23,11 +23,6 @@ const int LPWM_L = 11;
 #define ECHO_DEPAN_KIRI  7
 #define TRIG_BKNG        8   // Ultrasonik Belakang
 #define ECHO_BKNG        9
-
-// NOTE: Pin IR_L (14) / IR_R (15) dengan TCRT5000 sudah tidak dipakai lagi
-// sejak kontrol kecepatan diganti ke open-loop ramping (lihat TaskMotorRamp).
-// Kabel/hardware boleh tetap terpasang, tapi tidak ada pembacaan pulsa lagi
-// di firmware ini. Hapus baris ini juga kalau modul IR memang dilepas.
 
 SemaphoreHandle_t i2cMutex;
 
@@ -44,8 +39,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // ===== VARIABEL GLOBAL (SHARED RESOURCES) =====
 volatile long dist_depan_kanan = 0, dist_depan_kiri = 0, dist_back = 0;
-volatile bool safety_front_active = false;  // Objek di depan → blokir maju
-volatile bool safety_back_active  = false;  // Objek di belakang → blokir mundur
+volatile bool safety_front_active = false;  
+volatile bool safety_back_active  = false;  
 volatile int current_command = CMD_DIAM;
 
 // Nilai PWM yang sedang aktif dieksekusi ke motor (untuk tampilan OLED)
@@ -75,10 +70,6 @@ long readUltrasonicCM(int trigPin, int echoPin) {
 }
 
 // ===== FUNGSI CEK SISA RAM & FLASH =====
-// Dipanggil sekali di akhir setup() (setelah semua task & modul aktif, supaya
-// datanya merepresentasikan kondisi operasional nyata, bukan sketch kosong),
-// dan diulang berkala lewat Serial supaya bisa lihat tren (misal RAM makin
-// abis / fragmentasi) selama sistem berjalan lama.
 void printMemoryInfo() {
   Serial0.println("\n===== INFORMASI MEMORI MIKROKONTROLER =====");
 
@@ -164,15 +155,17 @@ void TaskMotorRamp(void *pvParameters) {
 
       case CMD_MUNDUR:
         if (!safety_back_active) {
-          target_pwm_L = 57;  // Kebalikan maju -> Kiri positif
-          target_pwm_R = -80;   // Kebalikan maju -> Kanan negatif
+          target_pwm_L = -57; // Kiri negatif untuk maju
+          target_pwm_R = -80;    // Kanan positif untuk maju
+//          target_pwm_L = - 57;  // Kebalikan maju -> Kiri positif
+//          target_pwm_R = -45;   // Kebalikan maju -> Kanan negatif
         }
         break;
 
       case CMD_KIRI:
         // Belok kiri: Roda kiri DIAM, Roda kanan MAJU (+)
         target_pwm_L = 0;
-        target_pwm_R = 140;
+        target_pwm_R = 120;
         break;
 
       case CMD_KANAN:
