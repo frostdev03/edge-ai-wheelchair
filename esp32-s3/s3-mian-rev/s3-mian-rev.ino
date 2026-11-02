@@ -155,7 +155,7 @@ void TaskMotorRamp(void *pvParameters) {
 
       case CMD_MUNDUR:
         if (!safety_back_active) {
-          target_pwm_L = -57; // Kiri negatif untuk maju
+          target_pwm_L = 57; // Kiri negatif untuk maju
           target_pwm_R = -80;    // Kanan positif untuk maju
 //          target_pwm_L = - 57;  // Kebalikan maju -> Kiri positif
 //          target_pwm_R = -45;   // Kebalikan maju -> Kanan negatif
